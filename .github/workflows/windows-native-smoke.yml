@@ -1,0 +1,144 @@
+name: Windows Native Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - windows-native-smoke
+    paths:
+      - "**.v"
+      - "**.vsh"
+      - "**.c"
+      - "**.h"
+      - "**.m"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/windows-native-smoke.yml"
+  pull_request:
+    branches:
+      - windows-native-smoke
+    paths:
+      - "**.v"
+      - "**.vsh"
+      - "**.c"
+      - "**.h"
+      - "**.m"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/windows-native-smoke.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  msvc:
+    name: MSVC native smoke
+    runs-on: windows-latest
+    timeout-minutes: 25
+    env:
+      VFLAGS: -no-parallel -cc msvc
+    steps:
+      - name: Install V
+        uses: vlang/setup-v@v1.4
+        with:
+          check-latest: true
+      - name: Install pango and freetype
+        run: vcpkg install pango freetype
+      - name: Install vglyph
+        run: v install vglyph
+      - name: Checkout gui
+        uses: actions/checkout@v4
+        with:
+          path: gui
+      - name: Run noninteractive native tests
+        run: >
+          v test
+          gui/_native_dialog_test.v
+          gui/_native_print_test.v
+          gui/_native_notification_test.v
+          gui/nativebridge/_bridge_ex_test.v
+          gui/nativebridge/_readback_abi_test.v
+      - name: Compile native smoke examples
+        run: |
+          v -W -o dialogs_smoke.exe gui/examples/dialogs.v
+          v -W -o printing_smoke.exe gui/examples/printing.v
+          v -W -o notification_smoke.exe gui/examples/native_notification.v
+
+  clang:
+    name: Clang native smoke (exploratory)
+    runs-on: windows-latest
+    timeout-minutes: 25
+    continue-on-error: true
+    env:
+      VFLAGS: -no-parallel -cc clang
+    steps:
+      - name: Install V
+        uses: vlang/setup-v@v1.4
+        with:
+          check-latest: true
+      - name: Install pango and freetype
+        run: vcpkg install pango freetype
+      - name: Install vglyph
+        run: v install vglyph
+      - name: Checkout gui
+        uses: actions/checkout@v4
+        with:
+          path: gui
+      - name: Run noninteractive native tests
+        run: >
+          v test
+          gui/_native_dialog_test.v
+          gui/_native_print_test.v
+          gui/_native_notification_test.v
+          gui/nativebridge/_bridge_ex_test.v
+          gui/nativebridge/_readback_abi_test.v
+      - name: Compile native smoke examples
+        run: |
+          v -W -o dialogs_smoke.exe gui/examples/dialogs.v
+          v -W -o printing_smoke.exe gui/examples/printing.v
+          v -W -o notification_smoke.exe gui/examples/native_notification.v
+
+  mingw:
+    name: MinGW native smoke (exploratory)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    env:
+      VFLAGS: -no-parallel -cc gcc
+    steps:
+      - name: Install V
+        uses: vlang/setup-v@v1.4
+        with:
+          check-latest: true
+      - name: Install MSYS2 MinGW dependencies
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          path-type: inherit
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-pango
+            mingw-w64-x86_64-freetype
+      - name: Install vglyph
+        shell: msys2 {0}
+        run: v install vglyph
+      - name: Checkout gui
+        uses: actions/checkout@v4
+        with:
+          path: gui
+      - name: Run noninteractive native tests
+        shell: msys2 {0}
+        run: >
+          v test
+          gui/_native_dialog_test.v
+          gui/_native_print_test.v
+          gui/_native_notification_test.v
+          gui/nativebridge/_bridge_ex_test.v
+          gui/nativebridge/_readback_abi_test.v
+      - name: Compile native smoke examples
+        shell: msys2 {0}
+        run: |
+          v -W -o dialogs_smoke.exe gui/examples/dialogs.v
+          v -W -o printing_smoke.exe gui/examples/printing.v
+          v -W -o notification_smoke.exe gui/examples/native_notification.v
