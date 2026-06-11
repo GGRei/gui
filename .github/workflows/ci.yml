@@ -24,6 +24,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
+env:
+  V_VERSION: 0.5.1
+
 jobs:
   linting:
     # Temporary smoke-branch acceleration: Ubuntu/macOS jobs are skipped on
@@ -35,11 +38,25 @@ jobs:
       VFLAGS: -no-parallel
     steps:
       - name: Install V
-        id: install-v
-        uses: vlang/setup-v@v1.4
-        with:
-          stable: true
-          check-latest: true
+        shell: bash
+        run: |
+          asset="v_linux.zip"
+          curl -L --fail --retry 3 -o "$asset" "https://github.com/vlang/v/releases/download/${V_VERSION}/${asset}"
+          unzip -q "$asset"
+          chmod +x "$PWD/v/v"
+          echo "$PWD/v" >> "$GITHUB_PATH"
+      - name: Verify V version
+        shell: bash
+        run: |
+          v_version="$(v version)"
+          echo "$v_version"
+          case "$v_version" in
+            *"$V_VERSION"*) ;;
+            *)
+              echo "Expected V version $V_VERSION"
+              exit 1
+              ;;
+          esac
       - name: Install vglyph
         run: v install vglyph
       - name: Install C development dependencies (headers and libs)
@@ -73,11 +90,40 @@ jobs:
       VFLAGS: -no-parallel
     steps:
       - name: Install V
-        id: install-v
-        uses: vlang/setup-v@v1.4
-        with:
-          stable: true
-          check-latest: true
+        shell: bash
+        run: |
+          case "${{ runner.os }}" in
+            Linux)
+              asset="v_linux.zip"
+              ;;
+            macOS)
+              if [ "$(uname -m)" = "arm64" ]; then
+                asset="v_macos_arm64.zip"
+              else
+                asset="v_macos_x86_64.zip"
+              fi
+              ;;
+            *)
+              echo "Unsupported runner OS: ${{ runner.os }}"
+              exit 1
+              ;;
+          esac
+          curl -L --fail --retry 3 -o "$asset" "https://github.com/vlang/v/releases/download/${V_VERSION}/${asset}"
+          unzip -q "$asset"
+          chmod +x "$PWD/v/v"
+          echo "$PWD/v" >> "$GITHUB_PATH"
+      - name: Verify V version
+        shell: bash
+        run: |
+          v_version="$(v version)"
+          echo "$v_version"
+          case "$v_version" in
+            *"$V_VERSION"*) ;;
+            *)
+              echo "Expected V version $V_VERSION"
+              exit 1
+              ;;
+          esac
       - name: Install vglyph
         run: v install vglyph
       - name: Install X11/GL development dependencies (headers and libs)
@@ -104,11 +150,23 @@ jobs:
       VFLAGS: -no-parallel
     steps:
       - name: Install V
-        id: install-v
-        uses: vlang/setup-v@v1.4
-        with:
-          stable: true
-          check-latest: true
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $asset = 'v_windows.zip'
+          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
+          Invoke-WebRequest -Uri $url -OutFile $asset
+          Expand-Archive -Path $asset -DestinationPath . -Force
+          $vPath = (Resolve-Path .\v).Path
+          Add-Content -Path $env:GITHUB_PATH -Value $vPath
+      - name: Verify V version
+        shell: pwsh
+        run: |
+          $vVersion = v version
+          Write-Host $vVersion
+          if ($vVersion -notlike "*$env:V_VERSION*") {
+            throw "Expected V version $env:V_VERSION"
+          }
       - name: Install pango and freetype
         run: vcpkg install pango freetype
       - name: Install vglyph

@@ -29,6 +29,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
+env:
+  V_VERSION: 0.5.1
+
 jobs:
   msvc:
     name: MSVC native smoke
@@ -36,10 +39,23 @@ jobs:
     timeout-minutes: 25
     steps:
       - name: Install V
-        uses: vlang/setup-v@v1.4
-        with:
-          stable: true
-          check-latest: true
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $asset = 'v_windows.zip'
+          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
+          Invoke-WebRequest -Uri $url -OutFile $asset
+          Expand-Archive -Path $asset -DestinationPath . -Force
+          $vPath = (Resolve-Path .\v).Path
+          Add-Content -Path $env:GITHUB_PATH -Value $vPath
+      - name: Verify V version
+        shell: pwsh
+        run: |
+          $vVersion = v version
+          Write-Host $vVersion
+          if ($vVersion -notlike "*$env:V_VERSION*") {
+            throw "Expected V version $env:V_VERSION"
+          }
       - name: Install pango and freetype
         run: vcpkg install pango freetype
       - name: Install vglyph
@@ -69,10 +85,23 @@ jobs:
     continue-on-error: true
     steps:
       - name: Install V
-        uses: vlang/setup-v@v1.4
-        with:
-          stable: true
-          check-latest: true
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $asset = 'v_windows.zip'
+          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
+          Invoke-WebRequest -Uri $url -OutFile $asset
+          Expand-Archive -Path $asset -DestinationPath . -Force
+          $vPath = (Resolve-Path .\v).Path
+          Add-Content -Path $env:GITHUB_PATH -Value $vPath
+      - name: Verify V version
+        shell: pwsh
+        run: |
+          $vVersion = v version
+          Write-Host $vVersion
+          if ($vVersion -notlike "*$env:V_VERSION*") {
+            throw "Expected V version $env:V_VERSION"
+          }
       - name: Install pango and freetype
         run: vcpkg install pango freetype
       - name: Install vglyph
@@ -102,10 +131,23 @@ jobs:
     continue-on-error: true
     steps:
       - name: Install V
-        uses: vlang/setup-v@v1.4
-        with:
-          stable: true
-          check-latest: true
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $asset = 'v_windows.zip'
+          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
+          Invoke-WebRequest -Uri $url -OutFile $asset
+          Expand-Archive -Path $asset -DestinationPath . -Force
+          $vPath = (Resolve-Path .\v).Path
+          Add-Content -Path $env:GITHUB_PATH -Value $vPath
+      - name: Verify V version
+        shell: pwsh
+        run: |
+          $vVersion = v version
+          Write-Host $vVersion
+          if ($vVersion -notlike "*$env:V_VERSION*") {
+            throw "Expected V version $env:V_VERSION"
+          }
       - name: Install MSYS2 MinGW dependencies
         uses: msys2/setup-msys2@v2
         with:
@@ -117,6 +159,18 @@ jobs:
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-pango
             mingw-w64-x86_64-freetype
+      - name: Verify V version in MSYS2
+        shell: msys2 {0}
+        run: |
+          v_version="$(v version)"
+          echo "$v_version"
+          case "$v_version" in
+            *"$V_VERSION"*) ;;
+            *)
+              echo "Expected V version $V_VERSION"
+              exit 1
+              ;;
+          esac
       - name: Install vglyph
         shell: msys2 {0}
         run: v install vglyph
