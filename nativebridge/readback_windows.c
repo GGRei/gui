@@ -1,14 +1,22 @@
 // readback_windows.c — D3D11 GPU texture readback.
 // Mirrors the Metal readback pattern: create a staging
 // texture, CopyResource, Map, copy rows, Unmap.
-// Returns malloc'd BGRA buffer. Caller must free().
+// Returns malloc'd BGRA buffer owned by the readback bridge.
 
 #ifdef _WIN32
+
+#ifndef COBJMACROS
+#define COBJMACROS
+#endif
 
 #include <d3d11.h>
 #include <stdlib.h>
 #include <string.h>
 #include "readback_bridge.h"
+
+void gui_readback_buffer_free(uint8_t* buffer) {
+    free(buffer);
+}
 
 uint8_t* gui_readback_d3d11_texture(
     void* texture_ptr,

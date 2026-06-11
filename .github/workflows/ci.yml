@@ -5,12 +5,18 @@ on:
     paths:
       - "**.v"
       - "**.vsh"
+      - "**.c"
+      - "**.h"
+      - "**.m"
       - "**.md"
       - "**/ci.yml"
   pull_request:
     paths:
       - "**.v"
       - "**.vsh"
+      - "**.c"
+      - "**.h"
+      - "**.m"
       - "**.md"
       - "**/ci.yml"
 

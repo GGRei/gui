@@ -32,6 +32,7 @@ module nativebridge
 #flag windows @VMODROOT/nativebridge/notification_windows.c
 #flag windows -lole32
 #flag windows -lshell32
+#flag windows -luser32
 #flag windows -luuid
 #include "@VMODROOT/nativebridge/a11y_bridge.h"
 #include "@VMODROOT/nativebridge/dialog_bridge.h"
@@ -187,6 +188,7 @@ fn C.gui_native_print_result_free(C.GuiNativePrintResult)
 fn C.gui_readback_metal_texture(mtl_texture voidptr, mtl_device voidptr, width int, height int) &u8
 fn C.gui_readback_gl_framebuffer(framebuffer u32, width int, height int) &u8
 fn C.gui_readback_d3d11_texture(d3d11_texture voidptr, d3d11_device voidptr, d3d11_context voidptr, width int, height int) &u8
+fn C.gui_readback_buffer_free(buffer &u8)
 
 fn bridge_print_unsupported_result() BridgePrintResult {
 	return BridgePrintResult{
@@ -389,20 +391,22 @@ pub fn save_dialog_ex(cfg BridgeSaveCfg) BridgeDialogResultEx {
 	$if macos {
 		extensions := cfg.extensions.join(',')
 		c_result := C.gui_native_save_dialog_ex(cfg.ns_window, cfg.title.str, cfg.start_dir.str,
-			cfg.default_name.str, cfg.default_extension.str, extensions.str, bool_to_int(cfg.confirm_overwrite))
+			cfg.default_name.str, cfg.default_extension.str, extensions.str,
+			bool_to_int(cfg.confirm_overwrite))
 		return bridge_dialog_result_ex_from_c(c_result)
 	} $else $if linux {
 		if C.gui_portal_available() != 0 {
 			extensions := cfg.extensions.join(',')
-			c_result := C.gui_portal_save_file(cfg.title.str, cfg.start_dir.str, cfg.default_name.str,
-				cfg.default_extension.str, extensions.str)
+			c_result := C.gui_portal_save_file(cfg.title.str, cfg.start_dir.str,
+				cfg.default_name.str, cfg.default_extension.str, extensions.str)
 			return bridge_dialog_result_ex_from_c(c_result)
 		}
 		return bridge_result_ex_from_legacy(linux_save_dialog(cfg))
 	} $else $if windows {
 		extensions := cfg.extensions.join(',')
 		c_result := C.gui_native_save_dialog_ex(cfg.ns_window, cfg.title.str, cfg.start_dir.str,
-			cfg.default_name.str, cfg.default_extension.str, extensions.str, bool_to_int(cfg.confirm_overwrite))
+			cfg.default_name.str, cfg.default_extension.str, extensions.str,
+			bool_to_int(cfg.confirm_overwrite))
 		return bridge_dialog_result_ex_from_c(c_result)
 	} $else {
 		return bridge_dialog_unsupported_result_ex()
@@ -499,7 +503,7 @@ pub fn readback_metal_texture(mtl_texture voidptr, mtl_device voidptr, width int
 		mut pixels := []u8{len: size}
 		unsafe {
 			vmemcpy(pixels.data, ptr, size)
-			free(ptr)
+			C.gui_readback_buffer_free(ptr)
 		}
 		return pixels
 	} $else {
@@ -520,7 +524,7 @@ pub fn readback_gl_framebuffer(framebuffer u32, width int, height int) ![]u8 {
 		mut pixels := []u8{len: size}
 		unsafe {
 			vmemcpy(pixels.data, ptr, size)
-			free(ptr)
+			C.gui_readback_buffer_free(ptr)
 		}
 		return pixels
 	} $else {
@@ -533,8 +537,8 @@ pub fn readback_gl_framebuffer(framebuffer u32, width int, height int) ![]u8 {
 // must gfx.commit() before calling. Windows only.
 pub fn readback_d3d11_texture(d3d11_texture voidptr, d3d11_device voidptr, d3d11_context voidptr, width int, height int) ![]u8 {
 	$if windows {
-		ptr := C.gui_readback_d3d11_texture(d3d11_texture, d3d11_device, d3d11_context,
-			width, height)
+		ptr := C.gui_readback_d3d11_texture(d3d11_texture, d3d11_device, d3d11_context, width,
+			height)
 		if ptr == unsafe { nil } {
 			return error('D3D11 texture readback failed')
 		}
@@ -542,7 +546,7 @@ pub fn readback_d3d11_texture(d3d11_texture voidptr, d3d11_device voidptr, d3d11
 		mut pixels := []u8{len: size}
 		unsafe {
 			vmemcpy(pixels.data, ptr, size)
-			free(ptr)
+			C.gui_readback_buffer_free(ptr)
 		}
 		return pixels
 	} $else {

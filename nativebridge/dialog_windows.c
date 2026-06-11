@@ -78,6 +78,22 @@ static char* gui_wide_to_utf8(const wchar_t* w) {
     return s;
 }
 
+typedef struct GuiWinComScope {
+    HRESULT hr;
+    int must_uninit;
+} GuiWinComScope;
+
+static GuiWinComScope gui_win_com_scope_init(void) {
+    GuiWinComScope scope;
+    scope.hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    scope.must_uninit = SUCCEEDED(scope.hr) ? 1 : 0;
+    return scope;
+}
+
+static void gui_win_com_scope_uninit(GuiWinComScope scope) {
+    if (scope.must_uninit) CoUninitialize();
+}
+
 // Parse "jpg,png,gif" CSV into COMDLG_FILTERSPEC array.
 // Returns count; *out receives malloc'd array. Caller frees
 // each spec's pszName and pszSpec, then the array itself.
@@ -256,9 +272,9 @@ GuiNativeDialogResultEx gui_native_open_dialog_ex(
     int allow_multiple
 ) {
     HRESULT hr;
-    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE
-        && hr != S_FALSE) {
+    GuiWinComScope com = gui_win_com_scope_init();
+    hr = com.hr;
+    if (FAILED(hr)) {
         return gui_win_result_error(
             "com_init", "CoInitializeEx failed");
     }
@@ -268,7 +284,7 @@ GuiNativeDialogResultEx gui_native_open_dialog_ex(
         &CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
         &IID_IFileOpenDialog, (void**)&dlg);
     if (FAILED(hr) || dlg == NULL) {
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "com_create", "IFileOpenDialog create failed");
     }
@@ -305,13 +321,13 @@ GuiNativeDialogResultEx gui_native_open_dialog_ex(
     if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
         IFileOpenDialog_Release(dlg);
         gui_free_filter_specs(specs, spec_count);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_cancel();
     }
     if (FAILED(hr)) {
         IFileOpenDialog_Release(dlg);
         gui_free_filter_specs(specs, spec_count);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "show", "dialog Show failed");
     }
@@ -322,7 +338,7 @@ GuiNativeDialogResultEx gui_native_open_dialog_ex(
     if (FAILED(hr) || items == NULL) {
         IFileOpenDialog_Release(dlg);
         gui_free_filter_specs(specs, spec_count);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "results", "GetResults failed");
     }
@@ -333,7 +349,7 @@ GuiNativeDialogResultEx gui_native_open_dialog_ex(
         IShellItemArray_Release(items);
         IFileOpenDialog_Release(dlg);
         gui_free_filter_specs(specs, spec_count);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_cancel();
     }
 
@@ -361,7 +377,7 @@ GuiNativeDialogResultEx gui_native_open_dialog_ex(
             "internal", "no valid paths");
     }
     free(paths);
-    CoUninitialize();
+    gui_win_com_scope_uninit(com);
     return result;
 }
 
@@ -375,9 +391,9 @@ GuiNativeDialogResultEx gui_native_save_dialog_ex(
     int confirm_overwrite
 ) {
     HRESULT hr;
-    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE
-        && hr != S_FALSE) {
+    GuiWinComScope com = gui_win_com_scope_init();
+    hr = com.hr;
+    if (FAILED(hr)) {
         return gui_win_result_error(
             "com_init", "CoInitializeEx failed");
     }
@@ -387,7 +403,7 @@ GuiNativeDialogResultEx gui_native_save_dialog_ex(
         &CLSID_FileSaveDialog, NULL, CLSCTX_INPROC_SERVER,
         &IID_IFileSaveDialog, (void**)&dlg);
     if (FAILED(hr) || dlg == NULL) {
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "com_create", "IFileSaveDialog create failed");
     }
@@ -445,13 +461,13 @@ GuiNativeDialogResultEx gui_native_save_dialog_ex(
     if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
         IFileSaveDialog_Release(dlg);
         gui_free_filter_specs(specs, spec_count);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_cancel();
     }
     if (FAILED(hr)) {
         IFileSaveDialog_Release(dlg);
         gui_free_filter_specs(specs, spec_count);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "show", "dialog Show failed");
     }
@@ -462,7 +478,7 @@ GuiNativeDialogResultEx gui_native_save_dialog_ex(
     if (FAILED(hr) || item == NULL) {
         IFileSaveDialog_Release(dlg);
         gui_free_filter_specs(specs, spec_count);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "result", "GetResult failed");
     }
@@ -479,7 +495,7 @@ GuiNativeDialogResultEx gui_native_save_dialog_ex(
         result = gui_win_result_error(
             "internal", "empty path from save dialog");
     }
-    CoUninitialize();
+    gui_win_com_scope_uninit(com);
     return result;
 }
 
@@ -490,9 +506,9 @@ GuiNativeDialogResultEx gui_native_folder_dialog_ex(
     int can_create_directories
 ) {
     HRESULT hr;
-    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
-    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE
-        && hr != S_FALSE) {
+    GuiWinComScope com = gui_win_com_scope_init();
+    hr = com.hr;
+    if (FAILED(hr)) {
         return gui_win_result_error(
             "com_init", "CoInitializeEx failed");
     }
@@ -502,7 +518,7 @@ GuiNativeDialogResultEx gui_native_folder_dialog_ex(
         &CLSID_FileOpenDialog, NULL, CLSCTX_INPROC_SERVER,
         &IID_IFileOpenDialog, (void**)&dlg);
     if (FAILED(hr) || dlg == NULL) {
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "com_create", "IFileOpenDialog create failed");
     }
@@ -529,12 +545,12 @@ GuiNativeDialogResultEx gui_native_folder_dialog_ex(
     hr = IFileDialog_Show((IFileDialog*)dlg, owner);
     if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
         IFileOpenDialog_Release(dlg);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_cancel();
     }
     if (FAILED(hr)) {
         IFileOpenDialog_Release(dlg);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "show", "dialog Show failed");
     }
@@ -544,7 +560,7 @@ GuiNativeDialogResultEx gui_native_folder_dialog_ex(
     hr = IFileDialog_GetResult((IFileDialog*)dlg, &item);
     if (FAILED(hr) || item == NULL) {
         IFileOpenDialog_Release(dlg);
-        CoUninitialize();
+        gui_win_com_scope_uninit(com);
         return gui_win_result_error(
             "result", "GetResult failed");
     }
@@ -560,7 +576,7 @@ GuiNativeDialogResultEx gui_native_folder_dialog_ex(
         result = gui_win_result_error(
             "internal", "empty path from folder dialog");
     }
-    CoUninitialize();
+    gui_win_com_scope_uninit(com);
     return result;
 }
 
