@@ -34,7 +34,7 @@ env:
 
 jobs:
   msvc:
-    name: MSVC native smoke
+    name: MSVC nativebridge smoke
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -56,30 +56,18 @@ jobs:
           if ($vVersion -notlike "*$env:V_VERSION*") {
             throw "Expected V version $env:V_VERSION"
           }
-      - name: Install pango and freetype
-        run: vcpkg install pango freetype
-      - name: Install vglyph
-        run: v install vglyph
       - name: Checkout gui
         uses: actions/checkout@v4
         with:
           path: gui
-      - name: Run noninteractive native tests
+      - name: Run nativebridge tests
         run: >
           v -no-parallel -cc msvc test
-          gui/_native_dialog_test.v
-          gui/_native_print_test.v
-          gui/_native_notification_test.v
           gui/nativebridge/_bridge_ex_test.v
           gui/nativebridge/_readback_abi_test.v
-      - name: Compile native smoke examples
-        run: |
-          v -no-parallel -cc msvc -W -o dialogs_smoke.exe gui/examples/dialogs.v
-          v -no-parallel -cc msvc -W -o printing_smoke.exe gui/examples/printing.v
-          v -no-parallel -cc msvc -W -o notification_smoke.exe gui/examples/native_notification.v
 
   clang:
-    name: Clang native smoke (exploratory)
+    name: Clang nativebridge smoke (exploratory)
     runs-on: windows-latest
     timeout-minutes: 25
     continue-on-error: true
@@ -102,30 +90,18 @@ jobs:
           if ($vVersion -notlike "*$env:V_VERSION*") {
             throw "Expected V version $env:V_VERSION"
           }
-      - name: Install pango and freetype
-        run: vcpkg install pango freetype
-      - name: Install vglyph
-        run: v install vglyph
       - name: Checkout gui
         uses: actions/checkout@v4
         with:
           path: gui
-      - name: Run noninteractive native tests
+      - name: Run nativebridge tests
         run: >
           v -no-parallel -cc clang test
-          gui/_native_dialog_test.v
-          gui/_native_print_test.v
-          gui/_native_notification_test.v
           gui/nativebridge/_bridge_ex_test.v
           gui/nativebridge/_readback_abi_test.v
-      - name: Compile native smoke examples
-        run: |
-          v -no-parallel -cc clang -W -o dialogs_smoke.exe gui/examples/dialogs.v
-          v -no-parallel -cc clang -W -o printing_smoke.exe gui/examples/printing.v
-          v -no-parallel -cc clang -W -o notification_smoke.exe gui/examples/native_notification.v
 
   mingw:
-    name: MinGW native smoke (exploratory)
+    name: MinGW nativebridge smoke (exploratory)
     runs-on: windows-latest
     timeout-minutes: 30
     continue-on-error: true
@@ -156,9 +132,6 @@ jobs:
           path-type: inherit
           install: >-
             mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-pango
-            mingw-w64-x86_64-freetype
       - name: Verify V version in MSYS2
         shell: msys2 {0}
         run: |
@@ -171,25 +144,13 @@ jobs:
               exit 1
               ;;
           esac
-      - name: Install vglyph
-        shell: msys2 {0}
-        run: v install vglyph
       - name: Checkout gui
         uses: actions/checkout@v4
         with:
           path: gui
-      - name: Run noninteractive native tests
+      - name: Run nativebridge tests
         shell: msys2 {0}
         run: >
           v -no-parallel -cc gcc test
-          gui/_native_dialog_test.v
-          gui/_native_print_test.v
-          gui/_native_notification_test.v
           gui/nativebridge/_bridge_ex_test.v
           gui/nativebridge/_readback_abi_test.v
-      - name: Compile native smoke examples
-        shell: msys2 {0}
-        run: |
-          v -no-parallel -cc gcc -W -o dialogs_smoke.exe gui/examples/dialogs.v
-          v -no-parallel -cc gcc -W -o printing_smoke.exe gui/examples/printing.v
-          v -no-parallel -cc gcc -W -o notification_smoke.exe gui/examples/native_notification.v

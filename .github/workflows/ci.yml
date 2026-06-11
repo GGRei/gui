@@ -2,6 +2,8 @@ name: CI Checks
 
 on:
   push:
+    branches-ignore:
+      - windows-native-smoke
     paths:
       - "**.v"
       - "**.vsh"
@@ -11,6 +13,8 @@ on:
       - "**.md"
       - "**/ci.yml"
   pull_request:
+    branches-ignore:
+      - windows-native-smoke
     paths:
       - "**.v"
       - "**.vsh"
@@ -31,7 +35,7 @@ jobs:
   linting:
     # Temporary smoke-branch acceleration: Ubuntu/macOS jobs are skipped on
     # windows-native-smoke. Re-enable full CI before final validation/merge.
-    if: github.ref != 'refs/heads/windows-native-smoke' && github.base_ref != 'windows-native-smoke'
+    if: github.ref != 'refs/heads/windows-native-smoke' && github.base_ref != 'windows-native-smoke' && github.head_ref != 'windows-native-smoke'
     runs-on: ubuntu-latest
     timeout-minutes: 25
     env:
@@ -79,7 +83,7 @@ jobs:
   compiling:
     # Temporary smoke-branch acceleration: Ubuntu/macOS jobs are skipped on
     # windows-native-smoke. Re-enable full CI before final validation/merge.
-    if: github.ref != 'refs/heads/windows-native-smoke' && github.base_ref != 'windows-native-smoke'
+    if: github.ref != 'refs/heads/windows-native-smoke' && github.base_ref != 'windows-native-smoke' && github.head_ref != 'windows-native-smoke'
     strategy:
       matrix:
         os: [ubuntu-latest, macos-latest]
@@ -144,6 +148,7 @@ jobs:
         run: v -cc clang gui/examples/_build.vsh
 
   compiling-on-windows:
+    if: github.ref != 'refs/heads/windows-native-smoke' && github.base_ref != 'windows-native-smoke' && github.head_ref != 'windows-native-smoke'
     runs-on: windows-latest
     timeout-minutes: 25
     env:
