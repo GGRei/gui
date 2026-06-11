@@ -38,6 +38,7 @@ jobs:
         id: install-v
         uses: vlang/setup-v@v1.4
         with:
+          stable: true
           check-latest: true
       - name: Install vglyph
         run: v install vglyph
@@ -69,12 +70,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     env:
-      VFLAGS: -no-parallel -cc clang
+      VFLAGS: -no-parallel
     steps:
       - name: Install V
         id: install-v
         uses: vlang/setup-v@v1.4
         with:
+          stable: true
           check-latest: true
       - name: Install vglyph
         run: v install vglyph
@@ -89,22 +91,23 @@ jobs:
         with:
           path: gui
       - name: Run tests
-        run: v test gui/
+        run: v -cc clang test gui/
       - name: Check compilation of examples
-        run: v should-compile-all gui/examples/
+        run: v -cc clang should-compile-all gui/examples/
       - name: Check compilation of examples with -W
-        run: v gui/examples/_build.vsh
+        run: v -cc clang gui/examples/_build.vsh
 
   compiling-on-windows:
     runs-on: windows-latest
     timeout-minutes: 25
     env:
-      VFLAGS: -no-parallel -cc msvc
+      VFLAGS: -no-parallel
     steps:
       - name: Install V
         id: install-v
         uses: vlang/setup-v@v1.4
         with:
+          stable: true
           check-latest: true
       - name: Install pango and freetype
         run: vcpkg install pango freetype
@@ -115,8 +118,8 @@ jobs:
         with:
           path: gui
       - name: Run tests
-        run: v test gui/
+        run: v -cc msvc test gui/
       - name: Check compilation of examples
-        run: v should-compile-all gui/examples/
+        run: v -cc msvc should-compile-all gui/examples/
       - name: Check compilation of examples with -W
-        run: v gui/examples/_build.vsh
+        run: v -cc msvc gui/examples/_build.vsh
