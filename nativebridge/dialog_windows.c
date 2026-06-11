@@ -12,8 +12,10 @@
 #include <windows.h>
 #include <shobjidl.h>
 #include <shlwapi.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <wchar.h>
 
 #include "dialog_bridge.h"
 
@@ -94,6 +96,22 @@ static void gui_win_com_scope_uninit(GuiWinComScope scope) {
     if (scope.must_uninit) CoUninitialize();
 }
 
+static void gui_win_swprintf(
+    wchar_t* dst,
+    size_t dst_count,
+    const wchar_t* fmt,
+    const wchar_t* a,
+    const wchar_t* b
+) {
+    if (dst == NULL || dst_count == 0) return;
+#ifdef _MSC_VER
+    swprintf_s(dst, dst_count, fmt, a, b);
+#else
+    swprintf(dst, dst_count, fmt, a, b);
+#endif
+    dst[dst_count - 1] = L'\0';
+}
+
 // Parse "jpg,png,gif" CSV into COMDLG_FILTERSPEC array.
 // Returns count; *out receives malloc'd array. Caller frees
 // each spec's pszName and pszSpec, then the array itself.
@@ -147,7 +165,7 @@ static int gui_parse_filter_specs(
         }
 
         // Build display name (uppercase ext).
-        size_t nlen = elen + 16;
+        size_t nlen = elen * 2 + 16;
         wchar_t* name = (wchar_t*)calloc(nlen, sizeof(wchar_t));
         if (name && pattern) {
             // e.g. "JPG Files (*.jpg)"
@@ -155,8 +173,9 @@ static int gui_parse_filter_specs(
             MultiByteToWideChar(
                 CP_UTF8, 0, token, -1, ext_upper, 63);
             CharUpperW(ext_upper);
-            _snwprintf(name, nlen - 1,
-                L"%s Files (%s)", ext_upper, pattern);
+            gui_win_swprintf(
+                name, nlen, L"%ls Files (%ls)",
+                ext_upper, pattern);
         }
 
         specs[idx].pszName = name;
