@@ -308,34 +308,18 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
 
-          function RunBundleGroup($label, $file, $tests) {
+          function RunBundleFile($label, $testArgs) {
             Write-Host "=== $label ==="
-            Write-Host "file: $file"
-            Write-Host "tests: $tests"
-            v -stats test -run-only $tests $file
+            v test @testArgs
             if ($LASTEXITCODE -ne 0) {
-              throw "Bundle group failed: $label"
+              Write-Error "Bundle file run failed: $label"
+              exit $LASTEXITCODE
             }
           }
 
-          RunBundleGroup 'locale parse minimal' 'gui/_locale_bundle_test.v' 'test_locale_parse_minimal'
-          RunBundleGroup 'locale parse full' 'gui/_locale_bundle_test.v' 'test_locale_parse_minimal,test_locale_parse_full'
-          RunBundleGroup 'locale parse strings' 'gui/_locale_bundle_test.v' 'test_locale_parse_minimal,test_locale_parse_full,test_locale_parse_strings_mapping'
-          RunBundleGroup 'locale invalid json' 'gui/_locale_bundle_test.v' 'test_locale_parse_minimal,test_locale_parse_full,test_locale_parse_strings_mapping,test_locale_parse_bad_json,test_locale_parse_empty_json,test_locale_parse_non_object_json'
-          RunBundleGroup 'locale arrays' 'gui/_locale_bundle_test.v' 'test_locale_parse_minimal,test_locale_parse_full,test_locale_parse_strings_mapping,test_locale_parse_bad_json,test_locale_parse_empty_json,test_locale_parse_non_object_json,test_locale_parse_wrong_array_length'
-          RunBundleGroup 'locale registry' 'gui/_locale_bundle_test.v' 'test_locale_parse_minimal,test_locale_parse_full,test_locale_parse_strings_mapping,test_locale_parse_bad_json,test_locale_parse_empty_json,test_locale_parse_non_object_json,test_locale_parse_wrong_array_length,test_locale_registry'
-          RunBundleGroup 'locale globals' 'gui/_locale_bundle_test.v' 'test_locale_parse_minimal,test_locale_parse_full,test_locale_parse_strings_mapping,test_locale_parse_bad_json,test_locale_parse_empty_json,test_locale_parse_non_object_json,test_locale_parse_wrong_array_length,test_locale_registry,test_locale_t'
-          RunBundleGroup 'locale load dir' 'gui/_locale_bundle_test.v' 'test_locale_parse_minimal,test_locale_parse_full,test_locale_parse_strings_mapping,test_locale_parse_bad_json,test_locale_parse_empty_json,test_locale_parse_non_object_json,test_locale_parse_wrong_array_length,test_locale_registry,test_locale_t,test_locale_load_dir'
-
-          RunBundleGroup 'theme color basics' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha'
-          RunBundleGroup 'theme parse minimal' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha,test_theme_parse_minimal'
-          RunBundleGroup 'theme parse full' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha,test_theme_parse_minimal,test_theme_parse_full'
-          RunBundleGroup 'theme parse colors' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha,test_theme_parse_minimal,test_theme_parse_full,test_theme_parse_colors_only'
-          RunBundleGroup 'theme invalid json' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha,test_theme_parse_minimal,test_theme_parse_full,test_theme_parse_colors_only,test_theme_parse_bad_json,test_theme_parse_empty_json,test_theme_parse_non_object_json'
-          RunBundleGroup 'theme json roundtrip' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha,test_theme_parse_minimal,test_theme_parse_full,test_theme_parse_colors_only,test_theme_parse_bad_json,test_theme_parse_empty_json,test_theme_parse_non_object_json,test_theme_to_json_roundtrip'
-          RunBundleGroup 'theme save load' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha,test_theme_parse_minimal,test_theme_parse_full,test_theme_parse_colors_only,test_theme_parse_bad_json,test_theme_parse_empty_json,test_theme_parse_non_object_json,test_theme_to_json_roundtrip,test_theme_save_load'
-          RunBundleGroup 'theme registry' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha,test_theme_parse_minimal,test_theme_parse_full,test_theme_parse_colors_only,test_theme_parse_bad_json,test_theme_parse_empty_json,test_theme_parse_non_object_json,test_theme_to_json_roundtrip,test_theme_save_load,test_theme_registry'
-          RunBundleGroup 'theme load dir' 'gui/_theme_bundle_test.v' 'test_to_hex_string,test_color_from_string_alpha,test_theme_parse_minimal,test_theme_parse_full,test_theme_parse_colors_only,test_theme_parse_bad_json,test_theme_parse_empty_json,test_theme_parse_non_object_json,test_theme_to_json_roundtrip,test_theme_save_load,test_theme_registry,test_theme_load_dir'
+          RunBundleFile 'locale bundle only' @('gui/_locale_bundle_test.v')
+          RunBundleFile 'theme bundle only' @('gui/_theme_bundle_test.v')
+          RunBundleFile 'locale plus theme bundles' @('gui/_locale_bundle_test.v', 'gui/_theme_bundle_test.v')
       - name: Check compilation of examples
         if: ${{ false }}
         env:
