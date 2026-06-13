@@ -161,29 +161,35 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 50
     env:
+      V_VERSION: 0.5.1
       VFLAGS: -no-parallel
       VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
     steps:
       - name: Install V
-        id: install-v
-        uses: vlang/setup-v@v1.4
-        with:
-          check-latest: true
-      - name: Capture V cache suffix
-        id: v-cache
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          $asset = 'v_windows.zip'
+          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
+          Invoke-WebRequest -Uri $url -OutFile $asset
+          Expand-Archive -Path $asset -DestinationPath . -Force
+          $vPath = (Resolve-Path .\v).Path
+          Add-Content -Path $env:GITHUB_PATH -Value $vPath
+      - name: Verify V version
         shell: pwsh
         run: |
           $vVersion = v version
           Write-Host $vVersion
-          $safeVersion = $vVersion -replace '[^A-Za-z0-9_.-]', '-'
-          "suffix=$safeVersion" | Add-Content -Path $env:GITHUB_OUTPUT
+          if ($vVersion -notlike "*$env:V_VERSION*") {
+            throw "Expected V version $env:V_VERSION"
+          }
       - name: Restore vcpkg binary cache
         id: restore-vcpkg-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE }}
-          key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.v-cache.outputs.suffix }}-v1
+          key: windows-vcpkg-x64-windows-pango-freetype-${{ env.V_VERSION }}-v1
           restore-keys: |
             windows-vcpkg-x64-windows-pango-freetype-
       - name: Restore V module cache
@@ -191,7 +197,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ~/.vmodules/vglyph
-          key: windows-vmodules-vglyph-${{ steps.v-cache.outputs.suffix }}-v1
+          key: windows-vmodules-vglyph-${{ env.V_VERSION }}-v1
           restore-keys: |
             windows-vmodules-vglyph-
       - name: Install pango and freetype
