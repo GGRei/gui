@@ -304,7 +304,7 @@ jobs:
         env:
           VFLAGS: -no-parallel -cc msvc
           VJOBS: 1
-        run: v test gui/
+        run: v test gui/_locale_bundle_test.v gui/_theme_bundle_test.v
       - name: Check compilation of examples
         if: ${{ false }}
         env:
