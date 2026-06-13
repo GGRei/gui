@@ -306,67 +306,17 @@ jobs:
           VJOBS: 1
           VTEST_ONLY_FN: test_*
         run: v test gui/
-      - name: Detect sqlite support
-        id: detect-sqlite
-        shell: pwsh
-        run: |
-          $vExe = (Get-Command v -ErrorAction Stop).Source
-          $dir = Split-Path -Parent $vExe
-          $found = $false
-          while ($dir -and -not $found) {
-            $candidateC = Join-Path $dir 'thirdparty/sqlite/sqlite3.c'
-            $candidateCpp = Join-Path $dir 'thirdparty/sqlite/sqlite3.cpp'
-            if ((Test-Path $candidateC) -or (Test-Path $candidateCpp)) {
-              $found = $true
-              break
-            }
-            $parent = Split-Path -Parent $dir
-            if ($parent -eq $dir) {
-              break
-            }
-            $dir = $parent
-          }
-          $value = $found.ToString().ToLowerInvariant()
-          "sqlite_available=$value" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          Write-Host "sqlite_available=$value"
       - name: Check compilation of examples
         env:
           VFLAGS: -no-parallel -cc msvc
-          SQLITE_AVAILABLE: ${{ steps.detect-sqlite.outputs.sqlite_available }}
-        shell: pwsh
-        run: |
-          $sqliteAvailable = $env:SQLITE_AVAILABLE -eq 'true'
-          $files = @(Get-ChildItem -Path 'gui/examples' -Filter '*.v' -File | Sort-Object FullName)
-          New-Item -ItemType Directory -Force -Path 'gui/examples/bin' | Out-Null
-          $errors = @()
-          foreach ($file in $files) {
-            $filePath = $file.FullName
-            if (-not $sqliteAvailable -and (Select-String -Path $filePath -Pattern 'vtest build:\s*present_sqlite3\?' -Quiet)) {
-              Write-Host "Skipping sqlite-conditioned example: $($file.Name)"
-              continue
-            }
-            $name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-            $outputFile = Join-Path 'gui/examples/bin' $name
-            Write-Host "v -no-parallel -o $outputFile $filePath"
-            v -no-parallel -o $outputFile $filePath
-            if ($LASTEXITCODE -ne 0) {
-              $errors += $filePath
-            }
-          }
-          if ($errors.Count -gt 0) {
-            Write-Host "Encountered $($errors.Count) example compile error(s)."
-            $errors | ForEach-Object { Write-Host "  $_" }
-            exit 1
-          }
+        run: v gui/examples/_build.vsh --no-warnings --skip-missing-sqlite
       - name: Check compilation of changed examples with -W
         if: github.event_name == 'pull_request'
         env:
           VFLAGS: -no-parallel -cc msvc
-          SQLITE_AVAILABLE: ${{ steps.detect-sqlite.outputs.sqlite_available }}
         shell: pwsh
         working-directory: gui
         run: |
-          $sqliteAvailable = $env:SQLITE_AVAILABLE -eq 'true'
           $baseRef = '${{ github.base_ref }}'
           git fetch --no-tags origin "${baseRef}:refs/remotes/origin/${baseRef}"
           if ($LASTEXITCODE -ne 0) {
@@ -380,54 +330,12 @@ jobs:
             Write-Host 'No changed example .v files to compile with -W.'
             exit 0
           }
-          $files = @($files | Where-Object {
-            $include = $true
-            if (-not $sqliteAvailable -and (Select-String -Path $_ -Pattern 'vtest build:\s*present_sqlite3\?' -Quiet)) {
-              Write-Host "Skipping sqlite-conditioned changed example: $_"
-              $include = $false
-            }
-            $include
-          })
-          if ($files.Count -eq 0) {
-            Write-Host 'No changed example .v files to compile with -W after sqlite filtering.'
-            exit 0
-          }
-          New-Item -ItemType Directory -Force -Path 'examples/bin' | Out-Null
-          foreach ($file in $files) {
-            $name = [System.IO.Path]::GetFileNameWithoutExtension($file)
-            $outputFile = "examples/bin/$name"
-            v -no-parallel -W -o $outputFile $file
-            if ($LASTEXITCODE -ne 0) {
-              exit $LASTEXITCODE
-            }
+          v examples/_build.vsh --skip-missing-sqlite @files
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
           }
       - name: Check compilation of examples with -W
         if: github.event_name != 'pull_request'
         env:
           VFLAGS: -no-parallel -cc msvc
-          SQLITE_AVAILABLE: ${{ steps.detect-sqlite.outputs.sqlite_available }}
-        shell: pwsh
-        run: |
-          $sqliteAvailable = $env:SQLITE_AVAILABLE -eq 'true'
-          $files = @(Get-ChildItem -Path 'gui/examples' -Filter '*.v' -File | Sort-Object FullName)
-          New-Item -ItemType Directory -Force -Path 'gui/examples/bin' | Out-Null
-          $errors = @()
-          foreach ($file in $files) {
-            $filePath = $file.FullName
-            if (-not $sqliteAvailable -and (Select-String -Path $filePath -Pattern 'vtest build:\s*present_sqlite3\?' -Quiet)) {
-              Write-Host "Skipping sqlite-conditioned example with -W: $($file.Name)"
-              continue
-            }
-            $name = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-            $outputFile = Join-Path 'gui/examples/bin' $name
-            Write-Host "v -no-parallel -W -o $outputFile $filePath"
-            v -no-parallel -W -o $outputFile $filePath
-            if ($LASTEXITCODE -ne 0) {
-              $errors += $filePath
-            }
-          }
-          if ($errors.Count -gt 0) {
-            Write-Host "Encountered $($errors.Count) example compile error(s)."
-            $errors | ForEach-Object { Write-Host "  $_" }
-            exit 1
-          }
+        run: v gui/examples/_build.vsh --skip-missing-sqlite
