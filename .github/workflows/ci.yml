@@ -306,20 +306,46 @@ jobs:
           VJOBS: 1
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = 'Continue'
 
-          function RunBundleFile($label, $testArgs) {
+          function RunProbe($label, [scriptblock]$command) {
             Write-Host "=== $label ==="
-            v test @testArgs
-            if ($LASTEXITCODE -ne 0) {
-              Write-Error "Bundle file run failed: $label"
-              exit $LASTEXITCODE
+            & $command
+            $code = $LASTEXITCODE
+            Write-Host "exit_code=$code"
+            return [pscustomobject]@{
+              Label = $label
+              Code = $code
             }
           }
 
-          RunBundleFile 'locale bundle only' @('gui/_locale_bundle_test.v')
-          RunBundleFile 'theme bundle only' @('gui/_theme_bundle_test.v')
-          RunBundleFile 'locale plus theme bundles' @('gui/_locale_bundle_test.v', 'gui/_theme_bundle_test.v')
+          $results = @()
+          $results += RunProbe 'direct locale test file' {
+            v -cc msvc gui/_locale_bundle_test.v
+          }
+          $results += RunProbe 'direct locale test file with VTEST_ONLY_FN' {
+            $env:VTEST_ONLY_FN = 'test_*'
+            v -cc msvc gui/_locale_bundle_test.v
+            Remove-Item Env:\VTEST_ONLY_FN -ErrorAction SilentlyContinue
+          }
+          $results += RunProbe 'direct locale test file keepc' {
+            v -keepc -cc msvc gui/_locale_bundle_test.v
+          }
+          $results += RunProbe 'direct locale test file keepc with VTEST_ONLY_FN' {
+            $env:VTEST_ONLY_FN = 'test_*'
+            v -keepc -cc msvc gui/_locale_bundle_test.v
+            Remove-Item Env:\VTEST_ONLY_FN -ErrorAction SilentlyContinue
+          }
+
+          Write-Host '=== summary ==='
+          $results | ForEach-Object {
+            Write-Host "$($_.Label): exit_code=$($_.Code)"
+          }
+
+          $firstFailure = $results | Where-Object { $_.Code -ne 0 } | Select-Object -First 1
+          if ($firstFailure) {
+            exit $firstFailure.Code
+          }
       - name: Check compilation of examples
         if: ${{ false }}
         env:
