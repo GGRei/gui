@@ -304,48 +304,8 @@ jobs:
         env:
           VFLAGS: -no-parallel -cc msvc
           VJOBS: 1
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Continue'
-
-          function RunProbe($label, [scriptblock]$command) {
-            Write-Host "=== $label ==="
-            & $command
-            $code = $LASTEXITCODE
-            Write-Host "exit_code=$code"
-            return [pscustomobject]@{
-              Label = $label
-              Code = $code
-            }
-          }
-
-          $results = @()
-          $results += RunProbe 'direct locale test file' {
-            v -cc msvc gui/_locale_bundle_test.v
-          }
-          $results += RunProbe 'direct locale test file with VTEST_ONLY_FN' {
-            $env:VTEST_ONLY_FN = 'test_*'
-            v -cc msvc gui/_locale_bundle_test.v
-            Remove-Item Env:\VTEST_ONLY_FN -ErrorAction SilentlyContinue
-          }
-          $results += RunProbe 'direct locale test file keepc' {
-            v -keepc -cc msvc gui/_locale_bundle_test.v
-          }
-          $results += RunProbe 'direct locale test file keepc with VTEST_ONLY_FN' {
-            $env:VTEST_ONLY_FN = 'test_*'
-            v -keepc -cc msvc gui/_locale_bundle_test.v
-            Remove-Item Env:\VTEST_ONLY_FN -ErrorAction SilentlyContinue
-          }
-
-          Write-Host '=== summary ==='
-          $results | ForEach-Object {
-            Write-Host "$($_.Label): exit_code=$($_.Code)"
-          }
-
-          $firstFailure = $results | Where-Object { $_.Code -ne 0 } | Select-Object -First 1
-          if ($firstFailure) {
-            exit $firstFailure.Code
-          }
+          VTEST_ONLY_FN: test_*
+        run: v test gui/_locale_bundle_test.v gui/_theme_bundle_test.v
       - name: Check compilation of examples
         if: ${{ false }}
         env:
