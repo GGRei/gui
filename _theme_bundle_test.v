@@ -145,9 +145,17 @@ fn test_theme_parse_colors_only() {
 }
 
 fn test_theme_parse_bad_json() {
+	eprintln('[gui-debug] test_theme_parse_bad_json begin')
+	flush_stderr()
+	eprintln('[gui-debug] test_theme_parse_bad_json before parse')
+	flush_stderr()
 	if _ := theme_parse('not json') {
+		eprintln('[gui-debug] test_theme_parse_bad_json success unexpected')
+		flush_stderr()
 		assert false, 'expected error for bad json'
 	}
+	eprintln('[gui-debug] test_theme_parse_bad_json error branch reached')
+	flush_stderr()
 }
 
 fn test_theme_to_json_roundtrip() {

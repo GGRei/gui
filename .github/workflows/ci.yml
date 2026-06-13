@@ -300,6 +300,12 @@ jobs:
         env:
           GUI_WINDOWS_PREFLIGHT_CC: msvc
         run: v -cc msvc run gui/_windows_preflight.vsh
+      - name: Debug bad JSON bundle tests
+        env:
+          VFLAGS: -no-parallel -cc msvc
+        run: |
+          v -stats test -run-only test_locale_parse_bad_json gui/_locale_bundle_test.v
+          v -stats test -run-only test_theme_parse_bad_json gui/_theme_bundle_test.v
       - name: Run tests
         env:
           VFLAGS: -no-parallel -cc msvc

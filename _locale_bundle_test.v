@@ -112,7 +112,17 @@ fn test_locale_parse_strings_mapping() {
 }
 
 fn test_locale_parse_bad_json() {
-	locale_parse('not json') or { return }
+	eprintln('[gui-debug] test_locale_parse_bad_json begin')
+	flush_stderr()
+	eprintln('[gui-debug] test_locale_parse_bad_json before parse')
+	flush_stderr()
+	locale_parse('not json') or {
+		eprintln('[gui-debug] test_locale_parse_bad_json error branch reached')
+		flush_stderr()
+		return
+	}
+	eprintln('[gui-debug] test_locale_parse_bad_json success unexpected')
+	flush_stderr()
 	assert false, 'expected error for bad JSON'
 }
 
