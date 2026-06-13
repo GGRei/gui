@@ -300,31 +300,10 @@ jobs:
         env:
           GUI_WINDOWS_PREFLIGHT_CC: msvc
         run: v -cc msvc run gui/_windows_preflight.vsh
-      - name: Debug bundle tests by function
-        env:
-          VFLAGS: -no-parallel -cc msvc
-        run: |
-          v -stats test -run-only test_locale_parse_minimal gui/_locale_bundle_test.v
-          v -stats test -run-only test_locale_parse_full gui/_locale_bundle_test.v
-          v -stats test -run-only test_locale_parse_strings_mapping gui/_locale_bundle_test.v
-          v -stats test -run-only test_locale_parse_bad_json gui/_locale_bundle_test.v
-          v -stats test -run-only test_locale_parse_wrong_array_length gui/_locale_bundle_test.v
-          v -stats test -run-only test_theme_to_hex_string gui/_theme_bundle_test.v
-          v -stats test -run-only test_color_from_string_alpha gui/_theme_bundle_test.v
-          v -stats test -run-only test_theme_parse_minimal gui/_theme_bundle_test.v
-          v -stats test -run-only test_theme_parse_full gui/_theme_bundle_test.v
-          v -stats test -run-only test_theme_parse_colors_only gui/_theme_bundle_test.v
-          v -stats test -run-only test_theme_parse_bad_json gui/_theme_bundle_test.v
-          v -stats test -run-only test_locale_registry gui/_locale_bundle_test.v
-          v -stats test -run-only test_locale_t gui/_locale_bundle_test.v
-          v -stats test -run-only test_locale_load_dir gui/_locale_bundle_test.v
-          v -stats test -run-only test_theme_to_json_roundtrip gui/_theme_bundle_test.v
-          v -stats test -run-only test_theme_save_load gui/_theme_bundle_test.v
-          v -stats test -run-only test_theme_registry gui/_theme_bundle_test.v
-          v -stats test -run-only test_theme_load_dir gui/_theme_bundle_test.v
       - name: Run tests
         env:
           VFLAGS: -no-parallel -cc msvc
+          VJOBS: 1
         run: v test gui/
       - name: Check compilation of examples
         env:

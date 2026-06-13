@@ -145,17 +145,9 @@ fn test_theme_parse_colors_only() {
 }
 
 fn test_theme_parse_bad_json() {
-	eprintln('[gui-debug] test_theme_parse_bad_json begin')
-	flush_stderr()
-	eprintln('[gui-debug] test_theme_parse_bad_json before parse')
-	flush_stderr()
 	if _ := theme_parse('not json') {
-		eprintln('[gui-debug] test_theme_parse_bad_json success unexpected')
-		flush_stderr()
 		assert false, 'expected error for bad json'
 	}
-	eprintln('[gui-debug] test_theme_parse_bad_json error branch reached')
-	flush_stderr()
 }
 
 fn test_theme_to_json_roundtrip() {
@@ -184,8 +176,12 @@ fn test_theme_to_json_roundtrip() {
 }
 
 fn test_theme_save_load() {
-	dir := os.join_path(os.temp_dir(), 'gui_theme_test')
-	os.mkdir_all(dir) or {}
+	dir := os.join_path(os.temp_dir(), 'gui_theme_test_${os.getpid()}')
+	os.rmdir_all(dir) or {}
+	os.mkdir_all(dir) or {
+		assert false, err.str()
+		return
+	}
 	defer {
 		os.rmdir_all(dir) or {}
 	}
@@ -204,6 +200,11 @@ fn test_theme_save_load() {
 }
 
 fn test_theme_registry() {
+	old_registry := theme_registry_snapshot()
+	defer {
+		theme_registry_restore(old_registry)
+	}
+
 	// Built-in themes registered by init()
 	t := theme_get('dark') or {
 		assert false, err.str()
@@ -233,14 +234,19 @@ fn test_theme_registry() {
 		return
 	}
 	assert t3.color_background.eq(rgb(10, 20, 30))
-
-	// Restore original
-	theme_register(theme_dark)
 }
 
 fn test_theme_load_dir() {
-	dir := os.join_path(os.temp_dir(), 'gui_theme_dir_test')
-	os.mkdir_all(dir) or {}
+	old_registry := theme_registry_snapshot()
+	defer {
+		theme_registry_restore(old_registry)
+	}
+	dir := os.join_path(os.temp_dir(), 'gui_theme_dir_test_${os.getpid()}')
+	os.rmdir_all(dir) or {}
+	os.mkdir_all(dir) or {
+		assert false, err.str()
+		return
+	}
 	defer {
 		os.rmdir_all(dir) or {}
 	}
