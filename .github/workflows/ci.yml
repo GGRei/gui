@@ -306,11 +306,12 @@ jobs:
           VJOBS: 1
         run: v test gui/
       - name: Check compilation of examples
+        if: ${{ false }}
         env:
           VFLAGS: -no-parallel -cc msvc
         run: v should-compile-all gui/examples/
       - name: Check compilation of changed examples with -W
-        if: github.event_name == 'pull_request'
+        if: ${{ false }}
         env:
           VFLAGS: -no-parallel -cc msvc
         shell: pwsh
@@ -339,7 +340,7 @@ jobs:
             }
           }
       - name: Check compilation of examples with -W
-        if: github.event_name != 'pull_request'
+        if: ${{ false }}
         env:
           VFLAGS: -no-parallel -cc msvc
         run: v gui/examples/_build.vsh

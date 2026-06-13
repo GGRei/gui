@@ -150,6 +150,22 @@ fn test_theme_parse_bad_json() {
 	}
 }
 
+fn test_theme_parse_empty_json() {
+	for content in ['', '   ', '\n\t '] {
+		if _ := theme_parse(content) {
+			assert false, 'expected error for empty JSON'
+		}
+	}
+}
+
+fn test_theme_parse_non_object_json() {
+	for content in ['[]', 'null', '"x"', '42'] {
+		if _ := theme_parse(content) {
+			assert false, 'expected error for non-object JSON'
+		}
+	}
+}
+
 fn test_theme_to_json_roundtrip() {
 	cfg := theme_dark_cfg
 	json_str := theme_to_json(cfg)

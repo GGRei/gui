@@ -116,6 +116,22 @@ fn test_locale_parse_bad_json() {
 	assert false, 'expected error for bad JSON'
 }
 
+fn test_locale_parse_empty_json() {
+	for content in ['', '   ', '\n\t '] {
+		if _ := locale_parse(content) {
+			assert false, 'expected error for empty JSON'
+		}
+	}
+}
+
+fn test_locale_parse_non_object_json() {
+	for content in ['[]', 'null', '"x"', '42'] {
+		if _ := locale_parse(content) {
+			assert false, 'expected error for non-object JSON'
+		}
+	}
+}
+
 fn test_locale_parse_wrong_array_length() {
 	content := '{
 		"id": "bad-arrays",
