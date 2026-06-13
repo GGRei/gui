@@ -305,14 +305,13 @@ jobs:
           VFLAGS: -no-parallel -cc msvc
           VJOBS: 1
           VTEST_ONLY_FN: test_*
-        run: v test gui/_locale_bundle_test.v gui/_theme_bundle_test.v
+        run: v test gui/
       - name: Check compilation of examples
-        if: ${{ false }}
         env:
           VFLAGS: -no-parallel -cc msvc
         run: v should-compile-all gui/examples/
       - name: Check compilation of changed examples with -W
-        if: ${{ false }}
+        if: github.event_name == 'pull_request'
         env:
           VFLAGS: -no-parallel -cc msvc
         shell: pwsh
@@ -341,7 +340,7 @@ jobs:
             }
           }
       - name: Check compilation of examples with -W
-        if: ${{ false }}
+        if: github.event_name != 'pull_request'
         env:
           VFLAGS: -no-parallel -cc msvc
         run: v gui/examples/_build.vsh
