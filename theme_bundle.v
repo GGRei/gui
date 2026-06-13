@@ -31,10 +31,10 @@ struct SizesBundle {
 }
 
 struct SpacingBundle {
-	small  f32 = -1
-	medium f32 = -1
-	large  f32 = -1
-	text   f32 = -1
+	spacing_small f32 = -1 @[json: 'small']
+	medium        f32 = -1
+	large         f32 = -1
+	text          f32 = -1
 }
 
 struct ScrollBundle {
@@ -299,7 +299,7 @@ fn text_or(t ?TextBundle, fallback TextStyle) TextStyle {
 fn spacing_f32_or(sp ?SpacingBundle, field string, fallback f32) f32 {
 	sb := sp or { return fallback }
 	v := match field {
-		'small' { sb.small }
+		'small' { sb.spacing_small }
 		'medium' { sb.medium }
 		'large' { sb.large }
 		'text' { sb.text }

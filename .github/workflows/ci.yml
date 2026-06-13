@@ -159,7 +159,7 @@ jobs:
 
   compiling-on-windows:
     runs-on: windows-latest
-    timeout-minutes: 50
+    timeout-minutes: 60
     env:
       V_VERSION: 0.5.1
       VFLAGS: -no-parallel
