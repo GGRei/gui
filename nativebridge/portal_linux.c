@@ -215,11 +215,15 @@ static GuiNativeDialogResultEx portal_parse_response(
 }
 
 // Add match rule for the portal Request.Response signal.
-static void portal_add_match(
+static int portal_add_match(
     DBusConnection* bus,
     const char* sender,
     const char* handle_path
 ) {
+    if (bus == NULL || sender == NULL || handle_path == NULL
+        || handle_path[0] == '\0') {
+        return 0;
+    }
     char rule[512];
     snprintf(rule, sizeof(rule),
         "type='signal',sender='%s',interface='" PORTAL_REQ
@@ -231,7 +235,9 @@ static void portal_add_match(
     dbus_connection_flush(bus);
     if (dbus_error_is_set(&err)) {
         dbus_error_free(&err);
+        return 0;
     }
+    return 1;
 }
 
 static void portal_remove_match(
@@ -239,6 +245,10 @@ static void portal_remove_match(
     const char* sender,
     const char* handle_path
 ) {
+    if (bus == NULL || sender == NULL || handle_path == NULL
+        || handle_path[0] == '\0') {
+        return;
+    }
     char rule[512];
     snprintf(rule, sizeof(rule),
         "type='signal',sender='%s',interface='" PORTAL_REQ
@@ -255,11 +265,8 @@ static void portal_remove_match(
 // Wait for the Response signal on handle_path. Timeout 120s.
 static GuiNativeDialogResultEx portal_wait_response(
     DBusConnection* bus,
-    const char* sender,
     const char* handle_path
 ) {
-    portal_add_match(bus, sender, handle_path);
-
     // Block-wait with timeout
     int timeout_ms = 120000;
     int elapsed = 0;
@@ -281,7 +288,6 @@ static GuiNativeDialogResultEx portal_wait_response(
             GuiNativeDialogResultEx result =
                 portal_parse_response(msg);
             dbus_message_unref(msg);
-            portal_remove_match(bus, sender, handle_path);
             return result;
         }
 
@@ -289,29 +295,35 @@ static GuiNativeDialogResultEx portal_wait_response(
         elapsed += step;
     }
 
-    portal_remove_match(bus, sender, handle_path);
     return portal_result_error("portal dialog timed out");
 }
 
-// Build the expected handle path from the bus unique name
-// and handle_token.
-static void portal_build_handle_path(
-    DBusConnection* bus,
+static int portal_build_handle_path_from_name(
+    const char* name,
     const char* token,
     char* buf,
     size_t len
 ) {
-    const char* name = dbus_bus_get_unique_name(bus);
-    if (name == NULL) {
-        buf[0] = '\0';
-        return;
+    if (buf == NULL || len == 0) {
+        return 0;
     }
-    // Unique name is like ":1.42" → replace : and . with _
+    buf[0] = '\0';
+    if (name == NULL || token == NULL || token[0] == '\0') {
+        return 0;
+    }
+
+    // Since xdg-desktop-portal 0.9, ":1.42" becomes "1_42".
+    if (name[0] == ':') {
+        name++;
+    }
+
     char sanitized[128];
     size_t j = 0;
     for (size_t i = 0; name[i] && j < sizeof(sanitized) - 1;
          i++) {
-        if (name[i] == ':' || name[i] == '.') {
+        if (name[i] == '.') {
+            sanitized[j++] = '_';
+        } else if (name[i] == ':') {
             sanitized[j++] = '_';
         } else {
             sanitized[j++] = name[i];
@@ -319,10 +331,229 @@ static void portal_build_handle_path(
     }
     sanitized[j] = '\0';
 
-    snprintf(buf, len,
+    if (sanitized[0] == '\0') {
+        return 0;
+    }
+
+    int written = snprintf(buf, len,
         "/org/freedesktop/portal/desktop/request/%s/%s",
         sanitized, token);
+    if (written < 0 || (size_t)written >= len) {
+        buf[0] = '\0';
+        return 0;
+    }
+    return 1;
 }
+
+// Build the expected handle path from the bus unique name
+// and handle_token.
+static int portal_build_handle_path(
+    DBusConnection* bus,
+    const char* token,
+    char* buf,
+    size_t len
+) {
+    if (buf == NULL || len == 0) {
+        return 0;
+    }
+    buf[0] = '\0';
+    if (bus == NULL) {
+        return 0;
+    }
+    const char* name = dbus_bus_get_unique_name(bus);
+    return portal_build_handle_path_from_name(name, token, buf, len);
+}
+
+static int portal_parse_request_handle(
+    DBusMessage* reply,
+    char* buf,
+    size_t len
+) {
+    if (buf == NULL || len == 0) {
+        return 0;
+    }
+    buf[0] = '\0';
+    if (reply == NULL) {
+        return 0;
+    }
+
+    DBusMessageIter args;
+    if (!dbus_message_iter_init(reply, &args)) {
+        return 0;
+    }
+    if (dbus_message_iter_get_arg_type(&args)
+        != DBUS_TYPE_OBJECT_PATH) {
+        return 0;
+    }
+
+    const char* handle_path = NULL;
+    dbus_message_iter_get_basic(&args, &handle_path);
+    if (handle_path == NULL || handle_path[0] == '\0') {
+        return 0;
+    }
+
+    int written = snprintf(buf, len, "%s", handle_path);
+    if (written < 0 || (size_t)written >= len) {
+        buf[0] = '\0';
+        return 0;
+    }
+    return 1;
+}
+
+static GuiNativeDialogResultEx portal_send_request_and_wait(
+    DBusConnection* bus,
+    DBusMessage* msg,
+    const char* expected_handle_path
+) {
+    if (bus == NULL || msg == NULL || expected_handle_path == NULL
+        || expected_handle_path[0] == '\0') {
+        if (msg != NULL) {
+            dbus_message_unref(msg);
+        }
+        return portal_result_error("invalid portal request");
+    }
+
+    int expected_match_installed =
+        portal_add_match(bus, PORTAL_BUS, expected_handle_path);
+    if (!expected_match_installed) {
+        dbus_message_unref(msg);
+        return portal_result_error("failed to add portal response match");
+    }
+
+    DBusError err;
+    dbus_error_init(&err);
+    DBusMessage* reply = dbus_connection_send_with_reply_and_block(
+        bus, msg, 5000, &err);
+    dbus_message_unref(msg);
+
+    if (dbus_error_is_set(&err)) {
+        char errbuf[256];
+        snprintf(errbuf, sizeof(errbuf),
+            "portal call failed: %s", err.message);
+        dbus_error_free(&err);
+        portal_remove_match(bus, PORTAL_BUS, expected_handle_path);
+        return portal_result_error(errbuf);
+    }
+    if (reply == NULL) {
+        portal_remove_match(bus, PORTAL_BUS, expected_handle_path);
+        return portal_result_error("portal call returned no reply");
+    }
+
+    char returned_handle_path[256];
+    if (!portal_parse_request_handle(
+            reply, returned_handle_path, sizeof(returned_handle_path))) {
+        dbus_message_unref(reply);
+        portal_remove_match(bus, PORTAL_BUS, expected_handle_path);
+        return portal_result_error(
+            "portal call returned invalid request handle");
+    }
+    dbus_message_unref(reply);
+
+    int returned_match_installed = 0;
+    if (strcmp(returned_handle_path, expected_handle_path) != 0) {
+        returned_match_installed =
+            portal_add_match(bus, PORTAL_BUS, returned_handle_path);
+        if (!returned_match_installed) {
+            portal_remove_match(bus, PORTAL_BUS, expected_handle_path);
+            return portal_result_error(
+                "failed to update portal response match");
+        }
+        portal_remove_match(bus, PORTAL_BUS, expected_handle_path);
+        expected_match_installed = 0;
+    }
+
+    GuiNativeDialogResultEx result =
+        portal_wait_response(bus, returned_handle_path);
+
+    if (returned_match_installed) {
+        portal_remove_match(bus, PORTAL_BUS, returned_handle_path);
+    }
+    if (expected_match_installed) {
+        portal_remove_match(bus, PORTAL_BUS, expected_handle_path);
+    }
+    return result;
+}
+
+#ifdef GUI_PORTAL_TESTING
+int gui_portal_test_build_handle_path_equals(
+    const char* unique_name,
+    const char* token,
+    const char* expected
+) {
+    char buf[256];
+    if (!portal_build_handle_path_from_name(
+            unique_name, token, buf, sizeof(buf))) {
+        return 0;
+    }
+    return expected != NULL && strcmp(buf, expected) == 0;
+}
+
+int gui_portal_test_build_handle_path_rejects_empty_sender(void) {
+    char buf[256];
+    return !portal_build_handle_path_from_name(
+        ":", "gui_token", buf, sizeof(buf));
+}
+
+int gui_portal_test_parse_reply_handle_equals(
+    const char* returned_handle,
+    const char* expected
+) {
+    DBusMessage* reply =
+        dbus_message_new(DBUS_MESSAGE_TYPE_METHOD_RETURN);
+    if (reply == NULL) {
+        return 0;
+    }
+
+    DBusMessageIter args;
+    dbus_message_iter_init_append(reply, &args);
+    if (!dbus_message_iter_append_basic(
+            &args, DBUS_TYPE_OBJECT_PATH, &returned_handle)) {
+        dbus_message_unref(reply);
+        return 0;
+    }
+
+    char buf[256];
+    int ok = portal_parse_request_handle(reply, buf, sizeof(buf))
+        && expected != NULL && strcmp(buf, expected) == 0;
+    dbus_message_unref(reply);
+    return ok;
+}
+
+int gui_portal_test_parse_reply_handle_rejects_empty_reply(void) {
+    DBusMessage* reply =
+        dbus_message_new(DBUS_MESSAGE_TYPE_METHOD_RETURN);
+    if (reply == NULL) {
+        return 0;
+    }
+
+    char buf[256];
+    int ok = !portal_parse_request_handle(reply, buf, sizeof(buf));
+    dbus_message_unref(reply);
+    return ok;
+}
+
+int gui_portal_test_parse_reply_handle_rejects_string(void) {
+    DBusMessage* reply =
+        dbus_message_new(DBUS_MESSAGE_TYPE_METHOD_RETURN);
+    if (reply == NULL) {
+        return 0;
+    }
+
+    DBusMessageIter args;
+    dbus_message_iter_init_append(reply, &args);
+    const char* value = "/not/an/object/path/type";
+    if (!dbus_message_iter_append_basic(
+            &args, DBUS_TYPE_STRING, &value)) {
+        dbus_message_unref(reply);
+        return 0;
+    }
+
+    char buf[256];
+    int ok = !portal_parse_request_handle(reply, buf, sizeof(buf));
+    dbus_message_unref(reply);
+    return ok;
+}
+#endif
 
 // Build file filter for the portal. Filters are encoded as
 // a(sa(us)) where each filter is (name, [(type, glob)]).
@@ -467,8 +698,10 @@ GuiNativeDialogResultEx gui_portal_open_file(
     portal_handle_token(token, sizeof(token));
 
     char handle_path[256];
-    portal_build_handle_path(bus, token,
-        handle_path, sizeof(handle_path));
+    if (!portal_build_handle_path(bus, token,
+            handle_path, sizeof(handle_path))) {
+        return portal_result_error("failed to build portal request handle");
+    }
 
     DBusMessage* msg = dbus_message_new_method_call(
         PORTAL_BUS, PORTAL_PATH, PORTAL_FC, "OpenFile");
@@ -500,24 +733,7 @@ GuiNativeDialogResultEx gui_portal_open_file(
 
     dbus_message_iter_close_container(&args, &opts);
 
-    DBusError err;
-    dbus_error_init(&err);
-    DBusMessage* reply = dbus_connection_send_with_reply_and_block(
-        bus, msg, 5000, &err);
-    dbus_message_unref(msg);
-
-    if (dbus_error_is_set(&err)) {
-        char errbuf[256];
-        snprintf(errbuf, sizeof(errbuf),
-            "portal call failed: %s", err.message);
-        dbus_error_free(&err);
-        return portal_result_error(errbuf);
-    }
-    if (reply != NULL) {
-        dbus_message_unref(reply);
-    }
-
-    return portal_wait_response(bus, PORTAL_BUS, handle_path);
+    return portal_send_request_and_wait(bus, msg, handle_path);
 }
 
 GuiNativeDialogResultEx gui_portal_save_file(
@@ -538,8 +754,10 @@ GuiNativeDialogResultEx gui_portal_save_file(
     portal_handle_token(token, sizeof(token));
 
     char handle_path[256];
-    portal_build_handle_path(bus, token,
-        handle_path, sizeof(handle_path));
+    if (!portal_build_handle_path(bus, token,
+            handle_path, sizeof(handle_path))) {
+        return portal_result_error("failed to build portal request handle");
+    }
 
     DBusMessage* msg = dbus_message_new_method_call(
         PORTAL_BUS, PORTAL_PATH, PORTAL_FC, "SaveFile");
@@ -573,24 +791,7 @@ GuiNativeDialogResultEx gui_portal_save_file(
 
     dbus_message_iter_close_container(&args, &opts);
 
-    DBusError err;
-    dbus_error_init(&err);
-    DBusMessage* reply = dbus_connection_send_with_reply_and_block(
-        bus, msg, 5000, &err);
-    dbus_message_unref(msg);
-
-    if (dbus_error_is_set(&err)) {
-        char errbuf[256];
-        snprintf(errbuf, sizeof(errbuf),
-            "portal call failed: %s", err.message);
-        dbus_error_free(&err);
-        return portal_result_error(errbuf);
-    }
-    if (reply != NULL) {
-        dbus_message_unref(reply);
-    }
-
-    return portal_wait_response(bus, PORTAL_BUS, handle_path);
+    return portal_send_request_and_wait(bus, msg, handle_path);
 }
 
 GuiNativeDialogResultEx gui_portal_open_directory(
@@ -608,8 +809,10 @@ GuiNativeDialogResultEx gui_portal_open_directory(
     portal_handle_token(token, sizeof(token));
 
     char handle_path[256];
-    portal_build_handle_path(bus, token,
-        handle_path, sizeof(handle_path));
+    if (!portal_build_handle_path(bus, token,
+            handle_path, sizeof(handle_path))) {
+        return portal_result_error("failed to build portal request handle");
+    }
 
     DBusMessage* msg = dbus_message_new_method_call(
         PORTAL_BUS, PORTAL_PATH, PORTAL_FC, "OpenFile");
@@ -637,22 +840,5 @@ GuiNativeDialogResultEx gui_portal_open_directory(
 
     dbus_message_iter_close_container(&args, &opts);
 
-    DBusError err;
-    dbus_error_init(&err);
-    DBusMessage* reply = dbus_connection_send_with_reply_and_block(
-        bus, msg, 5000, &err);
-    dbus_message_unref(msg);
-
-    if (dbus_error_is_set(&err)) {
-        char errbuf[256];
-        snprintf(errbuf, sizeof(errbuf),
-            "portal call failed: %s", err.message);
-        dbus_error_free(&err);
-        return portal_result_error(errbuf);
-    }
-    if (reply != NULL) {
-        dbus_message_unref(reply);
-    }
-
-    return portal_wait_response(bus, PORTAL_BUS, handle_path);
+    return portal_send_request_and_wait(bus, msg, handle_path);
 }

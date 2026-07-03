@@ -1,5 +1,16 @@
 module nativebridge
 
+$if linux {
+	#flag linux -DGUI_PORTAL_TESTING
+	#include "@VMODROOT/nativebridge/portal_linux_test.h"
+
+	fn C.gui_portal_test_build_handle_path_equals(&char, &char, &char) int
+	fn C.gui_portal_test_build_handle_path_rejects_empty_sender() int
+	fn C.gui_portal_test_parse_reply_handle_equals(&char, &char) int
+	fn C.gui_portal_test_parse_reply_handle_rejects_empty_reply() int
+	fn C.gui_portal_test_parse_reply_handle_rejects_string() int
+}
+
 fn test_linux_filter_arg_builds_patterns() {
 	filter := linux_filter_arg(['png', ' jpg ', '', 'txt'])
 	assert filter == '*.png *.jpg *.txt'
@@ -58,4 +69,38 @@ fn test_linux_print_capability_warnings_include_requested_options() {
 		scale_mode:  1
 	})
 	assert warnings.len >= 5
+}
+
+fn test_portal_handle_path_removes_unique_name_leading_colon() {
+	$if linux {
+		assert C.gui_portal_test_build_handle_path_equals(c':1.244', c'gui_1783082018_0',
+			c'/org/freedesktop/portal/desktop/request/1_244/gui_1783082018_0') == 1
+	}
+}
+
+fn test_portal_handle_path_sanitizes_dots_without_extra_prefix() {
+	$if linux {
+		assert C.gui_portal_test_build_handle_path_equals(c'1.244', c'gui_token',
+			c'/org/freedesktop/portal/desktop/request/1_244/gui_token') == 1
+	}
+}
+
+fn test_portal_handle_path_rejects_empty_sender() {
+	$if linux {
+		assert C.gui_portal_test_build_handle_path_rejects_empty_sender() == 1
+	}
+}
+
+fn test_portal_reply_handle_parses_object_path() {
+	$if linux {
+		handle := '/org/freedesktop/portal/desktop/request/1_244/gui_token'
+		assert C.gui_portal_test_parse_reply_handle_equals(handle.str, handle.str) == 1
+	}
+}
+
+fn test_portal_reply_handle_rejects_missing_or_wrong_type() {
+	$if linux {
+		assert C.gui_portal_test_parse_reply_handle_rejects_empty_reply() == 1
+		assert C.gui_portal_test_parse_reply_handle_rejects_string() == 1
+	}
 }
