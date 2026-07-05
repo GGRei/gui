@@ -1,0 +1,593 @@
+name: Windows D3D11 Runtime Smoke
+
+"on":
+  workflow_dispatch:
+  push:
+    branches:
+      - smoke/d3d11-runtime-pipeline-probes
+
+permissions:
+  contents: read
+
+jobs:
+  d3d11-runtime-smoke:
+    name: D3D11 runtime probes
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve V revision
+        id: v
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+          if ([string]::IsNullOrWhiteSpace($revision)) {
+            throw 'Could not resolve V HEAD revision'
+          }
+          "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Restore V compiler cache
+        id: restore-v-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: v
+          key: windows-d3d11-v-compiler-${{ steps.v.outputs.revision }}-v1
+
+      - name: Install V
+        id: install-v
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Assert-NativeCommand($Message) {
+            if ($LASTEXITCODE -ne 0) {
+              throw $Message
+            }
+          }
+
+          $expectedRevision = '${{ steps.v.outputs.revision }}'
+          if (Test-Path .\v\v.exe) {
+            $cachedRevision = (& git -C v rev-parse HEAD).Trim()
+            Assert-NativeCommand 'Could not inspect cached V revision'
+            if ($cachedRevision -ne $expectedRevision) {
+              Write-Host "Cached V revision $cachedRevision does not match expected $expectedRevision; rebuilding."
+              Remove-Item -Recurse -Force .\v
+            }
+          }
+          if (-not (Test-Path .\v\v.exe)) {
+            if (Test-Path .\v) {
+              Remove-Item -Recurse -Force .\v
+            }
+            git init v
+            Assert-NativeCommand 'git init failed'
+            git -C v remote add origin https://github.com/vlang/v
+            Assert-NativeCommand 'git remote add failed'
+            git -C v fetch --depth 1 origin $expectedRevision
+            Assert-NativeCommand 'git fetch failed'
+            git -C v checkout --detach FETCH_HEAD
+            Assert-NativeCommand 'git checkout failed'
+            Push-Location v
+            try {
+              cmd /c makev.bat
+              if ($LASTEXITCODE -ne 0) {
+                throw 'makev.bat failed'
+              }
+            } finally {
+              Pop-Location
+            }
+          }
+
+          $vPath = (Resolve-Path .\v).Path
+          Add-Content -Path $env:GITHUB_PATH -Value $vPath
+          $vVersion = (& "$vPath\v.exe" version).Trim()
+          $vRevision = (& git -C v rev-parse HEAD).Trim()
+          Assert-NativeCommand 'Could not inspect installed V revision'
+          Write-Host "V version: $vVersion"
+          Write-Host "V revision: $vRevision"
+          if ($vRevision -ne $expectedRevision) {
+            throw "Installed V revision $vRevision does not match expected $expectedRevision"
+          }
+          "version=$vVersion" | Add-Content -Path $env:GITHUB_OUTPUT
+          "revision=$vRevision" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Save V compiler cache
+        if: ${{ steps.restore-v-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: v
+          key: windows-d3d11-v-compiler-${{ steps.v.outputs.revision }}-v1
+
+      - name: Install MinGW GCC
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          path-type: inherit
+          install: >-
+            mingw-w64-x86_64-gcc
+
+      - name: Show toolchain
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          expected_v_revision="${{ steps.v.outputs.revision }}"
+          command -v v
+          v_version="$(v version)"
+          echo "$v_version"
+          v_revision="$(git -C v rev-parse HEAD)"
+          echo "$v_revision"
+          if [ "$v_revision" != "$expected_v_revision" ]; then
+            echo "Expected V revision $expected_v_revision"
+            exit 1
+          fi
+          command -v gcc
+          gcc --version
+
+      - name: Compile D3D11 smoke probes
+        shell: msys2 {0}
+        run: |
+          set +e
+          set -uo pipefail
+
+          log_dir="d3d11-smoke-logs"
+          mkdir -p "$log_dir"
+          : > "$log_dir/summary.txt"
+
+          print_command() {
+            printf 'Command:'
+            printf ' %q' "$@"
+            printf '\n'
+          }
+
+          format_exit_code() {
+            local code="$1"
+            printf '%s (0x%08X)' "$code" "$((code & 0xffffffff))"
+          }
+
+          compile_probe() {
+            local label="$1"
+            local mode="$2"
+            local output="$3"
+            local source="$4"
+            local d3d11="$5"
+            local validate="$6"
+            local log="$log_dir/${label}.compile.log"
+            local -a args=(-no-parallel -cc gcc)
+
+            if [ "$d3d11" = "yes" ]; then
+              args+=(-d sokol_d3d11)
+            fi
+            if [ "$validate" = "yes" ]; then
+              args+=(-cflags "-DSOKOL_VALIDATE_NON_FATAL")
+            fi
+            args+=(-o "$output" "$source")
+
+            echo "::group::Compile $label ($mode)"
+            rm -f "$output"
+            {
+              print_command v "${args[@]}"
+              v "${args[@]}"
+            } 2>&1 | tee "$log"
+            local code="${PIPESTATUS[0]}"
+            echo "Compile exit code: $(format_exit_code "$code")" | tee -a "$log"
+            echo "$label compile_exit=$code" >> "$log_dir/summary.txt"
+            echo "::endgroup::"
+          }
+
+          compile_probe \
+            "gg-validation-nonfatal" \
+            "validation-nonfatal" \
+            "gg_d3d11_smoke_validation_nonfatal.exe" \
+            "devtools/d3d11_runtime_smoke/gg_d3d11_smoke.v" \
+            "yes" \
+            "yes"
+          compile_probe \
+            "gui-builtin-sgl-validation-nonfatal" \
+            "validation-nonfatal" \
+            "gui_builtin_sgl_pipeline_smoke_validation_nonfatal.exe" \
+            "devtools/d3d11_runtime_smoke/gui_builtin_sgl_pipeline_smoke.v" \
+            "yes" \
+            "yes"
+          compile_probe \
+            "gg-default" \
+            "default" \
+            "gg_d3d11_smoke_default.exe" \
+            "devtools/d3d11_runtime_smoke/gg_d3d11_smoke.v" \
+            "yes" \
+            "no"
+          compile_probe \
+            "gui-builtin-sgl-default" \
+            "default" \
+            "gui_builtin_sgl_pipeline_smoke_default.exe" \
+            "devtools/d3d11_runtime_smoke/gui_builtin_sgl_pipeline_smoke.v" \
+            "yes" \
+            "no"
+          compile_probe \
+            "mingw-console" \
+            "console" \
+            "mingw_console_smoke.exe" \
+            "devtools/d3d11_runtime_smoke/mingw_console_smoke.v" \
+            "no" \
+            "no"
+
+      - name: Validate D3D11 C flags
+        shell: msys2 {0}
+        run: |
+          set +e
+          set -uo pipefail
+
+          log_dir="d3d11-smoke-logs"
+          mkdir -p "$log_dir"
+          summary="$log_dir/summary.txt"
+          log="$log_dir/d3d11-cflags.log"
+          : > "$log"
+
+          print_command() {
+            printf 'Command:'
+            printf ' %q' "$@"
+            printf '\n'
+          }
+
+          format_exit_code() {
+            local code="$1"
+            printf '%s (0x%08X)' "$code" "$((code & 0xffffffff))"
+          }
+
+          require_present() {
+            local pattern="$1"
+            local name="$2"
+            if grep -Eiq -- "$pattern" "$log"; then
+              echo "present: $name" | tee -a "$log"
+              return 0
+            fi
+            echo "missing required token: $name" | tee -a "$log"
+            return 1
+          }
+
+          require_absent() {
+            local pattern="$1"
+            local name="$2"
+            if grep -Eiq -- "$pattern" "$log"; then
+              echo "forbidden token present: $name" | tee -a "$log"
+              return 1
+            fi
+            echo "absent: $name" | tee -a "$log"
+            return 0
+          }
+
+          args=(
+            -dump-c-flags -
+            -no-parallel
+            -cc gcc
+            -os windows
+            -d sokol_d3d11
+            devtools/d3d11_runtime_smoke/gg_d3d11_smoke.v
+          )
+
+          echo "::group::Validate D3D11 C flags"
+          print_command v "${args[@]}" | tee -a "$log"
+          v "${args[@]}" >> "$log" 2>&1
+          command_code="$?"
+          echo "C flags command exit code: $(format_exit_code "$command_code")" | tee -a "$log"
+
+          validation_code=0
+          if [ "$command_code" -ne 0 ]; then
+            validation_code="$command_code"
+          fi
+          require_present 'SOKOL_D3D11' 'SOKOL_D3D11' || validation_code=1
+          require_present '(^|[^[:alnum:]_])(-l)?d3d11(\.lib)?([^[:alnum:]_]|$)' 'd3d11' || validation_code=1
+          require_present '(^|[^[:alnum:]_])(-l)?dxgi(\.lib)?([^[:alnum:]_]|$)' 'dxgi' || validation_code=1
+          require_absent 'SOKOL_GLCORE' 'SOKOL_GLCORE' || validation_code=1
+          require_absent 'opengl32' 'opengl32' || validation_code=1
+
+          echo "D3D11 C flags validation exit code: $(format_exit_code "$validation_code")" | tee -a "$log"
+          echo "d3d11-cflags cflags_exit=$validation_code" >> "$summary"
+          echo "::endgroup::"
+
+      - name: Inspect smoke executable imports
+        shell: msys2 {0}
+        run: |
+          set +e
+          set -uo pipefail
+
+          log_dir="d3d11-smoke-logs"
+          mkdir -p "$log_dir"
+          summary="$log_dir/summary.txt"
+
+          print_command() {
+            printf 'Command:'
+            printf ' %q' "$@"
+            printf '\n'
+          }
+
+          format_exit_code() {
+            local code="$1"
+            printf '%s (0x%08X)' "$code" "$((code & 0xffffffff))"
+          }
+
+          objdump_cmd="$(command -v objdump || command -v x86_64-w64-mingw32-objdump || true)"
+
+          inspect_imports() {
+            local label="$1"
+            local exe="$2"
+            local log="$log_dir/${label}.imports.log"
+            local full_log="$log_dir/${label}.imports.objdump.log"
+            : > "$log"
+            rm -f "$full_log"
+
+            echo "::group::Imports $label"
+            if [ -z "$objdump_cmd" ]; then
+              echo "Missing objdump command" | tee -a "$log"
+              echo "$label imports_exit=missing-objdump" >> "$summary"
+              echo "::endgroup::"
+              return
+            fi
+            if [ ! -f "$exe" ]; then
+              echo "Missing executable: $exe" | tee -a "$log"
+              echo "$label imports_exit=missing" >> "$summary"
+              echo "::endgroup::"
+              return
+            fi
+
+            print_command "$objdump_cmd" -p "$exe" | tee -a "$log"
+            "$objdump_cmd" -p "$exe" > "$full_log" 2>&1
+            local objdump_code="$?"
+            echo "objdump exit code: $(format_exit_code "$objdump_code")" | tee -a "$log"
+            echo "Full objdump log: $full_log" | tee -a "$log"
+            echo "DLL Name lines:" | tee -a "$log"
+            grep -E 'DLL Name' "$full_log" | tee -a "$log"
+            local grep_code="${PIPESTATUS[0]}"
+
+            local imports_code=0
+            if [ "$objdump_code" -ne 0 ]; then
+              imports_code="$objdump_code"
+            elif [ "$grep_code" -ne 0 ]; then
+              imports_code=1
+              echo "No DLL Name lines found" | tee -a "$log"
+            fi
+
+            echo "Imports inspection exit code: $(format_exit_code "$imports_code")" | tee -a "$log"
+            echo "$label imports_exit=$imports_code" >> "$summary"
+            echo "::endgroup::"
+          }
+
+          inspect_imports "gg-validation-nonfatal" "gg_d3d11_smoke_validation_nonfatal.exe"
+          inspect_imports "gui-builtin-sgl-validation-nonfatal" "gui_builtin_sgl_pipeline_smoke_validation_nonfatal.exe"
+          inspect_imports "gg-default" "gg_d3d11_smoke_default.exe"
+          inspect_imports "gui-builtin-sgl-default" "gui_builtin_sgl_pipeline_smoke_default.exe"
+          inspect_imports "mingw-console" "mingw_console_smoke.exe"
+
+      - name: Run D3D11 smoke probes
+        shell: pwsh
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $timeoutSeconds = 120
+          $logDir = Join-Path $PWD 'd3d11-smoke-logs'
+          $summaryPath = Join-Path $logDir 'summary.txt'
+          New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+          if (-not (Test-Path -LiteralPath $summaryPath)) {
+            New-Item -ItemType File -Force -Path $summaryPath | Out-Null
+          }
+
+          $msys2Location = $env:MSYS2_LOCATION
+          if ([string]::IsNullOrWhiteSpace($msys2Location)) {
+            throw 'MSYS2_LOCATION is empty; msys2/setup-msys2 did not expose its install path.'
+          }
+          $mingwBin = Join-Path $msys2Location 'mingw64\bin'
+          $usrBin = Join-Path $msys2Location 'usr\bin'
+          $env:Path = "$mingwBin;$usrBin;$env:Path"
+
+          function Add-SummaryLine {
+            param([string]$Line)
+            Add-Content -LiteralPath $summaryPath -Encoding utf8 -Value $Line
+          }
+
+          function Write-LogLine {
+            param(
+              [string]$Path,
+              [string]$Line
+            )
+            $Line | Tee-Object -FilePath $Path -Append
+          }
+
+          function Write-LogText {
+            param(
+              [string]$Path,
+              [string]$Text
+            )
+            if ([string]::IsNullOrEmpty($Text)) {
+              return
+            }
+            $Text.TrimEnd([char[]]@("`r", "`n")) | Tee-Object -FilePath $Path -Append
+          }
+
+          function Format-ExitCode {
+            param([AllowNull()][object]$Code)
+            if ($null -eq $Code) {
+              return 'null'
+            }
+            try {
+              $signed = [int64]$Code
+              $unsigned = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$signed), 0)
+              return ('{0} (0x{1:X8})' -f $signed, $unsigned)
+            } catch {
+              return [string]$Code
+            }
+          }
+
+          function Write-DiagnosticCommand {
+            param(
+              [string]$Path,
+              [string]$Command,
+              [string[]]$Arguments
+            )
+            Write-LogLine -Path $Path -Line "Command: $Command $($Arguments -join ' ')"
+            $oldNativePreference = $PSNativeCommandUseErrorActionPreference
+            $PSNativeCommandUseErrorActionPreference = $false
+            try {
+              $output = & $Command @Arguments 2>&1 | Out-String
+              $code = $LASTEXITCODE
+              Write-LogText -Path $Path -Text $output
+              Write-LogLine -Path $Path -Line "Exit code: $(Format-ExitCode $code)"
+            } catch {
+              Write-LogLine -Path $Path -Line "Diagnostic command failed: $($_.Exception.Message)"
+            } finally {
+              $PSNativeCommandUseErrorActionPreference = $oldNativePreference
+            }
+          }
+
+          $envLog = Join-Path $logDir 'environment.log'
+          Remove-Item -LiteralPath $envLog -Force -ErrorAction SilentlyContinue
+          Write-LogLine -Path $envLog -Line "Expected V revision: ${{ steps.v.outputs.revision }}"
+          Write-LogLine -Path $envLog -Line "MSYS2_LOCATION: $msys2Location"
+          Write-LogLine -Path $envLog -Line "MSYSTEM: $env:MSYSTEM"
+          Write-LogLine -Path $envLog -Line "PATH prepend: $mingwBin;$usrBin"
+          Write-LogLine -Path $envLog -Line "PATH: $env:Path"
+          Write-DiagnosticCommand -Path $envLog -Command 'v' -Arguments @('version')
+          Write-DiagnosticCommand -Path $envLog -Command 'git' -Arguments @('-C', 'v', 'rev-parse', 'HEAD')
+          Write-DiagnosticCommand -Path $envLog -Command 'where.exe' -Arguments @('gcc.exe')
+          Write-DiagnosticCommand -Path $envLog -Command 'where.exe' -Arguments @('v.exe')
+          Write-DiagnosticCommand -Path $envLog -Command 'where.exe' -Arguments @('libwinpthread-1.dll')
+          Write-DiagnosticCommand -Path $envLog -Command 'where.exe' -Arguments @('libgcc_s_seh-1.dll')
+          Write-DiagnosticCommand -Path $envLog -Command 'where.exe' -Arguments @('libstdc++-6.dll')
+
+          function Invoke-SmokeProbe {
+            param(
+              [string]$Label,
+              [string]$Mode,
+              [string]$Exe
+            )
+
+            $log = Join-Path $logDir "$Label.run.log"
+            Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+            Write-Host "::group::Run $Label ($Mode)"
+
+            try {
+              $exePath = Join-Path $PWD $Exe
+              if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
+                Write-LogLine -Path $log -Line "Missing executable: $Exe"
+                Add-SummaryLine "$Label run_exit=missing"
+                return
+              }
+
+              Write-LogLine -Path $log -Line "Command: .\$Exe"
+              Write-LogLine -Path $log -Line "Timeout: $timeoutSeconds seconds"
+
+              $stdoutPath = Join-Path $logDir "$Label.run.stdout.log"
+              $stderrPath = Join-Path $logDir "$Label.run.stderr.log"
+              Remove-Item -LiteralPath $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+              $process = Start-Process `
+                -FilePath $exePath `
+                -WorkingDirectory $PWD `
+                -RedirectStandardOutput $stdoutPath `
+                -RedirectStandardError $stderrPath `
+                -NoNewWindow `
+                -PassThru
+
+              Write-LogLine -Path $log -Line "Process id: $($process.Id)"
+              $completed = $process.WaitForExit($timeoutSeconds * 1000)
+              if (-not $completed) {
+                try {
+                  $process.Kill($true)
+                } catch {
+                  Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                }
+                $process.WaitForExit()
+                $code = 124
+                Write-LogLine -Path $log -Line "Timed out after $timeoutSeconds seconds; killed process."
+              } else {
+                $code = $process.ExitCode
+              }
+
+              if (Test-Path -LiteralPath $stdoutPath) {
+                Write-LogLine -Path $log -Line '--- stdout ---'
+                Write-LogText -Path $log -Text (Get-Content -LiteralPath $stdoutPath -Raw)
+              }
+              if (Test-Path -LiteralPath $stderrPath) {
+                Write-LogLine -Path $log -Line '--- stderr ---'
+                Write-LogText -Path $log -Text (Get-Content -LiteralPath $stderrPath -Raw)
+              }
+
+              Write-LogLine -Path $log -Line "Run exit code: $(Format-ExitCode $code)"
+              Add-SummaryLine "$Label run_exit=$code"
+            } catch {
+              Write-LogLine -Path $log -Line "Run harness error: $($_.Exception.Message)"
+              Add-SummaryLine "$Label run_exit=harness-error"
+            } finally {
+              Write-Host "::endgroup::"
+            }
+          }
+
+          Invoke-SmokeProbe `
+            -Label 'gg-validation-nonfatal' `
+            -Mode 'validation-nonfatal' `
+            -Exe 'gg_d3d11_smoke_validation_nonfatal.exe'
+          Invoke-SmokeProbe `
+            -Label 'gui-builtin-sgl-validation-nonfatal' `
+            -Mode 'validation-nonfatal' `
+            -Exe 'gui_builtin_sgl_pipeline_smoke_validation_nonfatal.exe'
+          Invoke-SmokeProbe `
+            -Label 'gg-default' `
+            -Mode 'default' `
+            -Exe 'gg_d3d11_smoke_default.exe'
+          Invoke-SmokeProbe `
+            -Label 'gui-builtin-sgl-default' `
+            -Mode 'default' `
+            -Exe 'gui_builtin_sgl_pipeline_smoke_default.exe'
+          Invoke-SmokeProbe `
+            -Label 'mingw-console' `
+            -Mode 'console' `
+            -Exe 'mingw_console_smoke.exe'
+
+      - name: Report D3D11 smoke result
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $summaryPath = Join-Path $PWD 'd3d11-smoke-logs/summary.txt'
+          $summaryLines = @()
+
+          if (Test-Path -LiteralPath $summaryPath) {
+            $summaryLines = Get-Content -LiteralPath $summaryPath
+          } else {
+            $summaryLines = @('summary_missing=true')
+          }
+
+          Write-Host 'D3D11 smoke summary:'
+          $summaryLines | ForEach-Object { Write-Host $_ }
+
+          if ($env:GITHUB_STEP_SUMMARY) {
+            @(
+              '### D3D11 smoke summary'
+              '```text'
+            ) + $summaryLines + @('```') |
+              Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          }
+
+          $failed = $false
+          foreach ($line in $summaryLines) {
+            if ($line -match '\b(?:compile|cflags|imports|run)_exit=(.+)$' -and $Matches[1].Trim() -ne '0') {
+              $failed = $true
+            }
+            if ($line -eq 'summary_missing=true') {
+              $failed = $true
+            }
+          }
+
+          if ($failed) {
+            exit 1
+          }
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-d3d11-runtime-smoke-logs
+          path: d3d11-smoke-logs/
+          if-no-files-found: ignore
