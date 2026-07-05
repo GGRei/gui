@@ -7,8 +7,12 @@ on:
       - "**.vsh"
       - "**.c"
       - "**.h"
+      - "**.glsl"
+      - "**.hlsl"
       - "**.m"
       - "**.md"
+      - "**.metal"
+      - "**.wgsl"
       - "**/ci.yml"
       - ".github/workflows/*.yml"
   pull_request:
@@ -17,8 +21,12 @@ on:
       - "**.vsh"
       - "**.c"
       - "**.h"
+      - "**.glsl"
+      - "**.hlsl"
       - "**.m"
       - "**.md"
+      - "**.metal"
+      - "**.wgsl"
       - "**/ci.yml"
       - ".github/workflows/*.yml"
 
@@ -117,6 +125,7 @@ jobs:
           fetch-depth: 0
       - name: Run tests
         env:
+          GUI_CHECK_GENERATED_SHADERS: "1"
           VFLAGS: -no-parallel -cc clang
         run: |
           test_manifest="${RUNNER_TEMP}/gui-test-files"
@@ -394,6 +403,7 @@ jobs:
         run: v -cc msvc run gui/_windows_preflight.vsh
       - name: Run tests
         env:
+          GUI_CHECK_GENERATED_SHADERS: "1"
           VFLAGS: -no-parallel -cc msvc
           VJOBS: 1
           VTEST_ONLY_FN: test_*

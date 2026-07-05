@@ -25,15 +25,17 @@ struct C.sg_gl_attachments_info {
 
 fn C.sg_gl_query_attachments_info(gfx.Attachments) C.sg_gl_attachments_info
 
-@[typedef]
-struct C.sg_d3d11_image_info {
-	tex2d voidptr
-	tex3d voidptr
-	res   voidptr
-	srv   voidptr
-}
+$if windows && sokol_d3d11 ? {
+	@[typedef]
+	struct C.sg_d3d11_image_info {
+		tex2d voidptr
+		tex3d voidptr
+		res   voidptr
+		srv   voidptr
+	}
 
-fn C.sg_d3d11_query_image_info(img gfx.Image) C.sg_d3d11_image_info
+	fn C.sg_d3d11_query_image_info(img gfx.Image) C.sg_d3d11_image_info
+}
 
 struct PrintPageRaster {
 	tex   gfx.Image
@@ -47,20 +49,19 @@ fn create_print_page_raster(w int, h int) !PrintPageRaster {
 	if w <= 0 || h <= 0 || w > 8192 || h > 8192 {
 		return error('invalid raster dimensions ${w}x${h}')
 	}
-	color_fmt := gfx.PixelFormat.from(sapp.color_format()) or { gfx.PixelFormat.bgra8 }
-	depth_fmt := gfx.PixelFormat.from(sapp.depth_format()) or { gfx.PixelFormat.depth_stencil }
+	formats := gui_render_target_formats()
 	tex := gfx.make_image(&gfx.ImageDesc{
 		render_target: true
 		width:         w
 		height:        h
-		pixel_format:  color_fmt
+		pixel_format:  formats.color
 		label:         c'print_page_tex'
 	})
 	depth := gfx.make_image(&gfx.ImageDesc{
 		render_target: true
 		width:         w
 		height:        h
-		pixel_format:  depth_fmt
+		pixel_format:  formats.depth
 		label:         c'print_page_depth'
 	})
 	mut att_colors := [4]gfx.AttachmentDesc{}
@@ -146,11 +147,13 @@ fn render_page_to_pixels(mut window Window, raster PrintPageRaster, source_width
 	} $else $if linux {
 		info := C.sg_gl_query_attachments_info(raster.att)
 		return nativebridge.readback_gl_framebuffer(info.framebuffer, raster.w, raster.h)
-	} $else $if windows {
+	} $else $if windows && sokol_d3d11 ? {
 		info := C.sg_d3d11_query_image_info(raster.tex)
 		env := sapp.glue_environment()
 		return nativebridge.readback_d3d11_texture(info.tex2d, env.d3d11.device,
 			env.d3d11.device_context, raster.w, raster.h)
+	} $else $if windows {
+		return error('raster PDF export is not supported on Windows OpenGL yet; build with -d sokol_d3d11 for the validated D3D11 readback path')
 	} $else {
 		return error('raster PDF export not yet supported on this platform')
 	}
@@ -311,7 +314,7 @@ fn pdf_render_document_raster(mut window Window, source_width f32, source_height
 			offset_y) or { return error('page ${idx + 1} render failed: ${err}') }
 		is_bgra := $if macos {
 			true
-		} $else $if windows {
+		} $else $if windows && sokol_d3d11 ? {
 			true
 		} $else {
 			false

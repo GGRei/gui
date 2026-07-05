@@ -106,7 +106,9 @@ fn build_glsl_fragment(body string) string {
 
 // shader_hash computes a cache key from the shader source.
 fn shader_hash(shader &Shader) u64 {
-	$if macos {
+	$if windows && sokol_d3d11 ? {
+		return hash_string('d3d11-custom-unsupported:' + shader.glsl)
+	} $else $if macos {
 		return hash_string(shader.metal)
 	} $else {
 		return hash_string(shader.glsl)

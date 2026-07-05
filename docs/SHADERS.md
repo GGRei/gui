@@ -4,6 +4,34 @@ v-gui supports custom fragment shaders on containers and rectangles.
 Write only the color computation body — the framework handles struct
 definitions, SDF round-rect clipping, and pipeline caching.
 
+## Backend Support
+
+The `Shader` API is a runtime source-string API for Metal and OpenGL:
+
+- macOS Metal uses the `metal` body.
+- OpenGL backends use the `glsl` body.
+- Windows D3D11 does not consume `glsl` bodies. D3D11 requires HLSL
+  source or bytecode plus vertex semantics, so custom `Shader` bodies
+  are not a supported D3D11 path yet.
+
+Generated built-in shaders are separate from this runtime `Shader` API. The
+checked-in built-in descriptors are produced with current `sokol-shdc` targets:
+`glsl410` for desktop `SG_BACKEND_GLCORE`, `hlsl4` for D3D11, and
+`metal_macos` for macOS Metal. The GLSL 3.3 contract below applies only to
+runtime custom `Shader.glsl` bodies.
+
+When compiled with `-d sokol_d3d11`, runtime custom shaders currently
+degrade to the normal rounded-rectangle fill and emit a warning instead
+of creating a GLSL pipeline. A successful `examples/custom_shader.v`
+compile on D3D11 only proves the fallback path compiles; it is not full
+custom shader support.
+
+For D3D11-specific rendering, use the generated sokol shader route in
+lower-level sokol code: generate shader descriptors with D3D11/HLSL
+support, keep the generated output fresh with the source shader, and
+compile with the opt-in Windows D3D11 backend. Do not treat a stale
+GLSL-only descriptor as D3D11-compatible.
+
 ## API Reference
 
 ### Shader
@@ -134,9 +162,10 @@ gui.column(
 ### Pipeline Caching
 
 Each unique shader source compiles to a GPU pipeline once. The
-framework hashes the active platform's source (Metal on macOS,
-GLSL elsewhere) and caches the pipeline in `Window.shader_pipelines`.
-Multiple views sharing the same shader source reuse one pipeline.
+framework hashes the active platform's supported source (Metal on
+macOS, GLSL on OpenGL backends) and caches the pipeline in
+`Window.shader_pipelines`. Multiple views sharing the same shader
+source reuse one pipeline.
 
 ### Rendering Priority
 
@@ -176,6 +205,9 @@ The 16-float `params` array maps to the `tm` uniform matrix:
 - Maximum 16 float parameters
 - Only available on `column`, `row`, `canvas`, `circle`, and
   `rectangle` views
+- Not supported on Windows D3D11 through this runtime `Shader` API.
+  Use generated sokol shaders with D3D11/HLSL output for D3D11-specific
+  custom rendering until a dedicated v-gui HLSL path exists.
 
 ## Demo
 

@@ -376,7 +376,7 @@ fn draw_gradient_border(x f32, y f32, w f32, h f32, radius f32, thickness f32, g
 	// rounded rect pipeline but with a hack:
 	// We use `draw_quad_gradient` logic but applied to the `rounded_rect` pipeline?
 	// NO, `rounded_rect_pip` expects a single color in `color0` attribute for the whole quad usually?
-	// Wait, `vs_glsl` takes `color0` attribute per vertex.
+	// The generated built-in vertex layout still carries `color0` per vertex.
 	// So we CAN pass different colors per vertex to `rounded_rect_pip`!
 
 	scale := window.ui.scale
