@@ -63,6 +63,45 @@ v -no-parallel -cc msvc -W -o notification_smoke.exe examples/native_notificatio
 The manual UI matrix lives in
 [`WINDOWS_MANUAL_SMOKE.md`](WINDOWS_MANUAL_SMOKE.md).
 
+## D3D11 Opt-In
+
+Windows still uses the upstream/default sokol OpenGL backend unless the
+selected V/sokol toolchain implements and receives the explicit D3D11 flag:
+
+```powershell
+v -no-parallel -cc msvc -d sokol_d3d11 -W -o printing_d3d11_smoke.exe examples/printing.v
+```
+
+Use this only with a V build that contains the sokol D3D11 backend work. The
+flag is not a v-gui public API and does not change the default Windows backend.
+
+### Readback And Raster Export
+
+`export_print_job` keeps the same public API on every backend. When sokol is
+initialized it uses GPU raster export; in non-GPU test paths it still falls back
+to the vector PDF renderer.
+
+Backend support during Windows validation:
+
+- Windows D3D11 with `-d sokol_d3d11`: raster export uses the D3D11 readback
+  bridge.
+- Windows default OpenGL: raster export does not route through D3D11. It returns
+  a structured unsupported-render error until a Windows OpenGL readback path is
+  implemented and validated.
+- Non-Windows OpenGL and Metal keep their existing readback paths.
+
+The D3D11 bridge is deliberately narrow: it reads single-sample BGRA8 render
+targets through a staging texture and copies rows with the D3D11 `RowPitch`.
+Unsupported formats, MSAA render targets, invalid dimensions or missing native
+handles fail instead of returning fabricated pixels.
+
+### Shader Boundary
+
+v-gui runtime custom shaders are currently Metal/OpenGL source bodies only. The
+`glsl` body is not a D3D11 shader source. D3D11-specific custom rendering should
+use generated sokol shader descriptors with D3D11/HLSL output, and generated
+shader files must be refreshed together with their source shader changes.
+
 ## Dependency Preflight
 
 Most Windows setup failures happen before native dialog or print callbacks can

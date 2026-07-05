@@ -18,7 +18,6 @@ module gui
 //    a complex shadow, just by changing the SDF math in the shader.
 import gg
 import log
-import sokol.sapp
 import sokol.sgl
 import sokol.gfx
 import math
@@ -93,17 +92,7 @@ fn filter_max_image_size() int {
 	return fallback_max_filter_image_size
 }
 
-fn init_rounded_rect_pipeline(mut window Window) bool {
-	if window.pip.rounded_rect.id != 0 {
-		return true
-	}
-	// Why a custom pipeline?
-	// A specific shader program (Vertex & Fragment) is required to implement the SDF logic.
-	// Standard immediate-mode rendering (sgl) generally uses a generic shader for coloured triangles.
-	// This pipeline configures the GPU to interpret vertex data specifically for SDF rendering
-	// and executes the corresponding fragment shader.
-
-	// Vertex layout
+fn gui_builtin_vertex_layout() gfx.VertexLayoutState {
 	mut attrs := [16]gfx.VertexAttrDesc{}
 	attrs[0] = gfx.VertexAttrDesc{
 		format:       .float3
@@ -120,236 +109,17 @@ fn init_rounded_rect_pipeline(mut window Window) bool {
 		offset:       20
 		buffer_index: 0
 	}
-
 	mut buffers := [8]gfx.VertexBufferLayoutState{}
 	buffers[0] = gfx.VertexBufferLayoutState{
 		stride: 24
 	}
-
-	// Shader attributes
-	// These map the vertex attribute buffers to the specific inputs defined in the shader code.
-	mut shader_attrs := [16]gfx.ShaderAttrDesc{}
-	// Map vertex buffer 'position' to shader input 'position' (semantic POSITION, index 0)
-	shader_attrs[0] = gfx.ShaderAttrDesc{
-		name:      c'position'
-		sem_name:  c'POSITION'
-		sem_index: 0
+	return gfx.VertexLayoutState{
+		attrs:   attrs
+		buffers: buffers
 	}
-	// Map vertex buffer 'texcoord0' to shader input 'texcoord0' (semantic TEXCOORD, index 0)
-	shader_attrs[1] = gfx.ShaderAttrDesc{
-		name:      c'texcoord0'
-		sem_name:  c'TEXCOORD'
-		sem_index: 0
-	}
-	// Map vertex buffer 'color0' to shader input 'color0' (semantic COLOR, index 0)
-	shader_attrs[2] = gfx.ShaderAttrDesc{
-		name:      c'color0'
-		sem_name:  c'COLOR'
-		sem_index: 0
-	}
-
-	// Uniform Definitions
-	// Define the layout of uniform blocks (constant data) passed to the shader.
-	mut ub_uniforms := [16]gfx.ShaderUniformDesc{}
-	// mvp: Model-View-Projection matrix (4x4 float matrix).
-	// usage: Transforms vertices from model space to clip space.
-	ub_uniforms[0] = gfx.ShaderUniformDesc{
-		name:        c'mvp'
-		@type:       .mat4
-		array_count: 1
-	}
-	// tm: Texture Matrix or auxiliary matrix.
-	// usage: In this pipeline, it is reserved for compatibility or future texture transforms.
-	ub_uniforms[1] = gfx.ShaderUniformDesc{
-		name:        c'tm'
-		@type:       .mat4
-		array_count: 1
-	}
-
-	// Uniform Block
-	// Groups uniforms into a single bindable block.
-	mut ub := [4]gfx.ShaderUniformBlockDesc{}
-	ub[0] = gfx.ShaderUniformBlockDesc{
-		size:     128 // Size: 64 bytes (mvp) + 64 bytes (tm) = 128 bytes.
-		uniforms: ub_uniforms
-	}
-
-	// Color Targets & Blending
-	// Configures how the pixel shader output is written to the framebuffer.
-	mut colors := [4]gfx.ColorTargetState{}
-	colors[0] = gfx.ColorTargetState{
-		blend:      gfx.BlendState{
-			enabled: true
-			// Src Alpha: Use the fragment's calculated alpha (from SDF).
-			src_factor_rgb: .src_alpha
-			// One Minus Src Alpha: Standard alpha blending (background * (1-alpha)).
-			dst_factor_rgb:   .one_minus_src_alpha
-			src_factor_alpha: .one
-			dst_factor_alpha: .one_minus_src_alpha
-		}
-		write_mask: .rgba // Enable writing to Red, Green, Blue, and Alpha channels.
-	}
-
-	// Texture Images
-	// Defines expected texture inputs. sgl generic pipelines expect a texture.
-	mut shader_images := [12]gfx.ShaderImageDesc{}
-	shader_images[0] = gfx.ShaderImageDesc{
-		used:        true
-		image_type:  ._2d
-		sample_type: .float
-	}
-
-	// Texture Samplers
-	// Defines how textures are sampled (filtering, wrapping).
-	mut shader_samplers := [8]gfx.ShaderSamplerDesc{}
-	shader_samplers[0] = gfx.ShaderSamplerDesc{
-		used:         true
-		sampler_type: .filtering // Linear filtering.
-	}
-
-	// Image-Sampler Pairs
-	// Maps images to samplers for the shader.
-	mut shader_image_sampler_pairs := [12]gfx.ShaderImageSamplerPairDesc{}
-	shader_image_sampler_pairs[0] = gfx.ShaderImageSamplerPairDesc{
-		used:         true
-		image_slot:   0
-		sampler_slot: 0
-		glsl_name:    c'tex' // Name of the sampler2D in GLSL code.
-	}
-
-	// Shader Description
-	// Compiles the shader stages (Vertex & Fragment) into a shader program (backend specific).
-	mut shader_desc := gfx.ShaderDesc{
-		attrs: shader_attrs
-	}
-
-	$if macos {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_metal.str // Use .str for &char
-			entry:          c'vs_main'
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_metal.str
-			entry:               c'fs_main'
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	} $else {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_glsl.str
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_glsl.str
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	}
-
-	// Pipeline Description
-	// Final assembly of the render pipeline state object (PSO).
-	// Combines shader, layout, and render state into an immutable object.
-	desc := gfx.PipelineDesc{
-		label:  c'rounded_rect_pip'
-		colors: colors
-		layout: gfx.VertexLayoutState{
-			attrs:   attrs
-			buffers: buffers
-		}
-		shader: gfx.make_shader(&shader_desc)
-	}
-
-	window.pip.rounded_rect = sgl.make_pipeline(&desc)
-	return window.pip.rounded_rect.id != 0
 }
 
-// Metal Shader Source (MSL) for Shadows
-
-// init_shadow_pipeline initializes the sgl pipeline specifically for rendering drop shadows.
-// It uses a custom shader (vs_shadow/fs_shadow) that implements a Gaussian-like blur approximation
-// using Signed Distance Fields (SDF).
-fn init_shadow_pipeline(mut window Window) {
-	if window.pip.shadow.id != 0 {
-		return
-	}
-
-	mut attrs := [16]gfx.VertexAttrDesc{}
-	// Attribute 0: Position (x, y, z)
-	// - x, y: Screen coordinates of the vertex.
-	// - z: Packed parameters (radius, blur/thickness). See pack_shader_params().
-	// Format .float3 means 3 x 32-bit floats.
-	attrs[0] = gfx.VertexAttrDesc{
-		format:       .float3
-		offset:       0
-		buffer_index: 0
-	}
-	// Attribute 1: Texture Coordinates (u, v)
-	// - u, v: Normalized coordinates (-1.0 to 1.0) used for SDF calculation.
-	// Format .float2 means 2 x 32-bit floats.
-	attrs[1] = gfx.VertexAttrDesc{
-		format:       .float2
-		offset:       12
-		buffer_index: 0
-	}
-	// Attribute 2: Color (r, g, b, a)
-	// - Standard RGBA color for the vertex.
-	// Format .ubyte4n means 4 unsigned bytes, normalized to 0.0-1.0 range.
-	attrs[2] = gfx.VertexAttrDesc{
-		format:       .ubyte4n
-		offset:       20
-		buffer_index: 0
-	}
-
-	mut buffers := [8]gfx.VertexBufferLayoutState{}
-	buffers[0] = gfx.VertexBufferLayoutState{
-		stride: 24
-	}
-
-	mut shader_attrs := [16]gfx.ShaderAttrDesc{}
-	// Shadow Mapping:
-	// Matches vertex attributes to the shadow shader inputs.
-	shader_attrs[0] = gfx.ShaderAttrDesc{
-		name:      c'position'
-		sem_name:  c'POSITION'
-		sem_index: 0
-	}
-	shader_attrs[1] = gfx.ShaderAttrDesc{
-		name:      c'texcoord0'
-		sem_name:  c'TEXCOORD'
-		sem_index: 0
-	}
-	shader_attrs[2] = gfx.ShaderAttrDesc{
-		name:      c'color0'
-		sem_name:  c'COLOR'
-		sem_index: 0
-	}
-
-	// Uniform Definitions (Shadow)
-	// Same layout as standard pipeline: MVP + Texture Matrix.
-	mut ub_uniforms := [16]gfx.ShaderUniformDesc{}
-	ub_uniforms[0] = gfx.ShaderUniformDesc{
-		name:        c'mvp'
-		@type:       .mat4
-		array_count: 1
-	}
-	ub_uniforms[1] = gfx.ShaderUniformDesc{
-		name:        c'tm'
-		@type:       .mat4
-		array_count: 1
-	}
-
-	// Uniform Block (Shadow)
-	mut ub := [4]gfx.ShaderUniformBlockDesc{}
-	ub[0] = gfx.ShaderUniformBlockDesc{
-		size:     128
-		uniforms: ub_uniforms
-	}
-
-	// Color Targets (Shadow)
-	// Same blending as rounded rect: Src Alpha / One Minus Src Alpha.
+fn gui_builtin_alpha_colors() [4]gfx.ColorTargetState {
 	mut colors := [4]gfx.ColorTargetState{}
 	colors[0] = gfx.ColorTargetState{
 		blend:      gfx.BlendState{
@@ -361,76 +131,55 @@ fn init_shadow_pipeline(mut window Window) {
 		}
 		write_mask: .rgba
 	}
+	return colors
+}
 
-	// Images/Samplers setup (standard sgl requirement)
-	// Texture Images (Shadow)
-	// Even though our shadow is procedural, sgl requires a texture slot definition.
-	mut shader_images := [12]gfx.ShaderImageDesc{}
-	shader_images[0] = gfx.ShaderImageDesc{
-		used:        true
-		image_type:  ._2d
-		sample_type: .float
-	}
-	// Texture Samplers (Shadow)
-	mut shader_samplers := [8]gfx.ShaderSamplerDesc{}
-	shader_samplers[0] = gfx.ShaderSamplerDesc{
-		used:         true
-		sampler_type: .filtering
-	}
-	// Image-Sampler Pairs (Shadow)
-	mut shader_image_sampler_pairs := [12]gfx.ShaderImageSamplerPairDesc{}
-	shader_image_sampler_pairs[0] = gfx.ShaderImageSamplerPairDesc{
-		used:         true
-		image_slot:   0
-		sampler_slot: 0
-		glsl_name:    c'tex'
-	}
-
-	// Shader Description (Shadow)
-	mut shader_desc := gfx.ShaderDesc{
-		attrs: shader_attrs
-	}
-
-	$if macos {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_shadow_metal.str
-			entry:          c'vs_main'
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source: fs_shadow_metal.str
-			entry:  c'fs_main'
-
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	} $else {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_shadow_glsl.str
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_shadow_glsl.str
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	}
-
-	// Pipeline Description (Shadow)
-	// Assembles the shadow rendering pipeline.
+fn make_gui_builtin_sgl_pipeline(label &char, shader gfx.Shader) sgl.Pipeline {
 	desc := gfx.PipelineDesc{
-		label:  c'shadow_pip'
-		colors: colors
-		layout: gfx.VertexLayoutState{
-			attrs:   attrs
-			buffers: buffers
-		}
-		shader: gfx.make_shader(&shader_desc)
+		label:  unsafe { label }
+		colors: gui_builtin_alpha_colors()
+		layout: gui_builtin_vertex_layout()
+		shader: shader
 	}
+	return sgl.make_pipeline(&desc)
+}
 
-	window.pip.shadow = sgl.make_pipeline(&desc)
+fn make_gui_builtin_sgl_context_pipeline(ctx sgl.Context, label &char, shader gfx.Shader) sgl.Pipeline {
+	desc := gfx.PipelineDesc{
+		label:  unsafe { label }
+		colors: gui_builtin_alpha_colors()
+		layout: gui_builtin_vertex_layout()
+		shader: shader
+	}
+	return sgl.context_make_pipeline(ctx, &desc)
+}
+
+fn make_gui_builtin_gfx_pipeline(label &char, shader gfx.Shader) gfx.Pipeline {
+	return gfx.make_pipeline(&gfx.PipelineDesc{
+		label:  unsafe { label }
+		colors: gui_builtin_alpha_colors()
+		layout: gui_builtin_vertex_layout()
+		shader: shader
+	})
+}
+
+fn init_rounded_rect_pipeline(mut window Window) bool {
+	if window.pip.rounded_rect.id != 0 {
+		return true
+	}
+	window.pip.rounded_rect = make_gui_builtin_sgl_pipeline(c'rounded_rect_pip',
+		gfx.make_shader(voidptr(C.gui_rounded_rect_shader_desc(gfx.query_backend()))))
+	return window.pip.rounded_rect.id != 0
+}
+
+// init_shadow_pipeline initializes the generated built-in pipeline for rendering drop shadows.
+// The shader implements a Gaussian-like blur approximation using Signed Distance Fields (SDF).
+fn init_shadow_pipeline(mut window Window) {
+	if window.pip.shadow.id != 0 {
+		return
+	}
+	window.pip.shadow = make_gui_builtin_sgl_pipeline(c'shadow_pip',
+		gfx.make_shader(voidptr(C.gui_shadow_shader_desc(gfx.query_backend()))))
 }
 
 // init_blur_pipeline initializes the pipeline for a standalone Gaussian blur effect.
@@ -440,308 +189,18 @@ fn init_blur_pipeline(mut window Window) {
 	if window.pip.blur.id != 0 {
 		return
 	}
-
-	mut attrs := [16]gfx.VertexAttrDesc{}
-	// Attribute 0: Position & Packed Params
-	// The Z component carries the blur radius and corner radius data to the shader.
-	attrs[0] = gfx.VertexAttrDesc{
-		format:       .float3
-		offset:       0
-		buffer_index: 0
-	}
-	// Attribute 1: Texture Coordinates
-	// Used to compute the distance from the center of the shape (SDF).
-	attrs[1] = gfx.VertexAttrDesc{
-		format:       .float2
-		offset:       12
-		buffer_index: 0
-	}
-	// Attribute 2: Vertex Color
-	// Base color of the shape, multiplied by the calculated alpha from the SDF.
-	attrs[2] = gfx.VertexAttrDesc{
-		format:       .ubyte4n
-		offset:       20
-		buffer_index: 0
-	}
-
-	mut buffers := [8]gfx.VertexBufferLayoutState{}
-	buffers[0] = gfx.VertexBufferLayoutState{
-		stride: 24
-	}
-
-	mut shader_attrs := [16]gfx.ShaderAttrDesc{}
-	// Blur Mapping:
-	// Identical mapping for the blur shader.
-	shader_attrs[0] = gfx.ShaderAttrDesc{
-		name:      c'position'
-		sem_name:  c'POSITION'
-		sem_index: 0
-	}
-	shader_attrs[1] = gfx.ShaderAttrDesc{
-		name:      c'texcoord0'
-		sem_name:  c'TEXCOORD'
-		sem_index: 0
-	}
-	shader_attrs[2] = gfx.ShaderAttrDesc{
-		name:      c'color0'
-		sem_name:  c'COLOR'
-		sem_index: 0
-	}
-
-	// Uniform Definitions (Blur)
-	// Same layout as standard pipeline: MVP + Texture Matrix.
-	mut ub_uniforms := [16]gfx.ShaderUniformDesc{}
-	ub_uniforms[0] = gfx.ShaderUniformDesc{
-		name:        c'mvp'
-		@type:       .mat4
-		array_count: 1
-	}
-	ub_uniforms[1] = gfx.ShaderUniformDesc{
-		name:        c'tm'
-		@type:       .mat4
-		array_count: 1
-	}
-
-	// Uniform Block (Blur)
-	mut ub := [4]gfx.ShaderUniformBlockDesc{}
-	ub[0] = gfx.ShaderUniformBlockDesc{
-		size:     128
-		uniforms: ub_uniforms
-	}
-
-	// Color Targets (Blur)
-	// Same blending as rounded rect: Src Alpha / One Minus Src Alpha.
-	mut colors := [4]gfx.ColorTargetState{}
-	colors[0] = gfx.ColorTargetState{
-		blend:      gfx.BlendState{
-			enabled:          true
-			src_factor_rgb:   .src_alpha
-			dst_factor_rgb:   .one_minus_src_alpha
-			src_factor_alpha: .one
-			dst_factor_alpha: .one_minus_src_alpha
-		}
-		write_mask: .rgba
-	}
-
-	// Texture Images (Blur)
-	mut shader_images := [12]gfx.ShaderImageDesc{}
-	shader_images[0] = gfx.ShaderImageDesc{
-		used:        true
-		image_type:  ._2d
-		sample_type: .float
-	}
-	// Texture Samplers (Blur)
-	mut shader_samplers := [8]gfx.ShaderSamplerDesc{}
-	shader_samplers[0] = gfx.ShaderSamplerDesc{
-		used:         true
-		sampler_type: .filtering // Linear filtering.
-	}
-	// Image-Sampler Pairs (Blur)
-	mut shader_image_sampler_pairs := [12]gfx.ShaderImageSamplerPairDesc{}
-	shader_image_sampler_pairs[0] = gfx.ShaderImageSamplerPairDesc{
-		used:         true
-		image_slot:   0
-		sampler_slot: 0
-		glsl_name:    c'tex'
-	}
-
-	// Shader Description (Blur)
-	mut shader_desc := gfx.ShaderDesc{
-		attrs: shader_attrs
-	}
-
-	$if macos {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			// Reusing shadow vertex shader as it has params/offset
-			source:         vs_shadow_metal.str
-			entry:          c'vs_main'
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_blur_metal.str
-			entry:               c'fs_main'
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	} $else {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_shadow_glsl.str
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_blur_glsl.str
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	}
-
-	// Pipeline Description (Blur)
-	// Assembles the blur rendering pipeline.
-	desc := gfx.PipelineDesc{
-		label:  c'blur_pip'
-		colors: colors
-		layout: gfx.VertexLayoutState{
-			attrs:   attrs
-			buffers: buffers
-		}
-		shader: gfx.make_shader(&shader_desc)
-	}
-
-	window.pip.blur = sgl.make_pipeline(&desc)
+	window.pip.blur = make_gui_builtin_sgl_pipeline(c'blur_pip',
+		gfx.make_shader(voidptr(C.gui_blur_shader_desc(gfx.query_backend()))))
 }
 
-// init_gradient_pipeline initializes the pipeline for multi-stop gradient rendering.
-// It uses custom shaders (vs_gradient/fs_gradient) that implement CSS-style gradients
-// with 3 color stops packed into the tm uniform matrix.
+// init_gradient_pipeline initializes the generated built-in pipeline for multi-stop gradient rendering.
+// Gradient stop data is packed into the tm uniform matrix.
 fn init_gradient_pipeline(mut window Window) {
 	if window.pip.gradient.id != 0 {
 		return
 	}
-
-	mut attrs := [16]gfx.VertexAttrDesc{}
-	// Attribute 0: Position (x, y, z)
-	attrs[0] = gfx.VertexAttrDesc{
-		format:       .float3
-		offset:       0
-		buffer_index: 0
-	}
-	// Attribute 1: Texture Coordinates (u, v)
-	attrs[1] = gfx.VertexAttrDesc{
-		format:       .float2
-		offset:       12
-		buffer_index: 0
-	}
-	// Attribute 2: Color (r, g, b, a)
-	attrs[2] = gfx.VertexAttrDesc{
-		format:       .ubyte4n
-		offset:       20
-		buffer_index: 0
-	}
-
-	mut buffers := [8]gfx.VertexBufferLayoutState{}
-	buffers[0] = gfx.VertexBufferLayoutState{
-		stride: 24
-	}
-
-	mut shader_attrs := [16]gfx.ShaderAttrDesc{}
-	shader_attrs[0] = gfx.ShaderAttrDesc{
-		name:      c'position'
-		sem_name:  c'POSITION'
-		sem_index: 0
-	}
-	shader_attrs[1] = gfx.ShaderAttrDesc{
-		name:      c'texcoord0'
-		sem_name:  c'TEXCOORD'
-		sem_index: 0
-	}
-	shader_attrs[2] = gfx.ShaderAttrDesc{
-		name:      c'color0'
-		sem_name:  c'COLOR'
-		sem_index: 0
-	}
-
-	// Uniform Definitions (Gradient)
-	// tm matrix carries gradient stop data: tm[0..2] as vec4(r,g,b,pos)
-	mut ub_uniforms := [16]gfx.ShaderUniformDesc{}
-	ub_uniforms[0] = gfx.ShaderUniformDesc{
-		name:        c'mvp'
-		@type:       .mat4
-		array_count: 1
-	}
-	ub_uniforms[1] = gfx.ShaderUniformDesc{
-		name:        c'tm'
-		@type:       .mat4
-		array_count: 1
-	}
-
-	// Uniform Block (Gradient)
-	mut ub := [4]gfx.ShaderUniformBlockDesc{}
-	ub[0] = gfx.ShaderUniformBlockDesc{
-		size:     128
-		uniforms: ub_uniforms
-	}
-
-	// Color Targets (Gradient)
-	// Alpha blending for gradient transparency
-	mut colors := [4]gfx.ColorTargetState{}
-	colors[0] = gfx.ColorTargetState{
-		blend:      gfx.BlendState{
-			enabled:          true
-			src_factor_rgb:   .src_alpha
-			dst_factor_rgb:   .one_minus_src_alpha
-			src_factor_alpha: .one
-			dst_factor_alpha: .one_minus_src_alpha
-		}
-		write_mask: .rgba
-	}
-
-	// Texture Images (Gradient)
-	mut shader_images := [12]gfx.ShaderImageDesc{}
-	shader_images[0] = gfx.ShaderImageDesc{
-		used:        true
-		image_type:  ._2d
-		sample_type: .float
-	}
-	// Texture Samplers (Gradient)
-	mut shader_samplers := [8]gfx.ShaderSamplerDesc{}
-	shader_samplers[0] = gfx.ShaderSamplerDesc{
-		used:         true
-		sampler_type: .filtering
-	}
-	// Image-Sampler Pairs (Gradient)
-	mut shader_image_sampler_pairs := [12]gfx.ShaderImageSamplerPairDesc{}
-	shader_image_sampler_pairs[0] = gfx.ShaderImageSamplerPairDesc{
-		used:         true
-		image_slot:   0
-		sampler_slot: 0
-		glsl_name:    c'tex'
-	}
-
-	// Shader Description (Gradient)
-	mut shader_desc := gfx.ShaderDesc{
-		attrs: shader_attrs
-	}
-
-	$if macos {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_gradient_metal.str
-			entry:          c'vs_main'
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_gradient_metal.str
-			entry:               c'fs_main'
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	} $else {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_gradient_glsl.str
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_gradient_glsl.str
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	}
-
-	// Pipeline Description (Gradient)
-	desc := gfx.PipelineDesc{
-		label:  c'gradient_pip'
-		colors: colors
-		layout: gfx.VertexLayoutState{
-			attrs:   attrs
-			buffers: buffers
-		}
-		shader: gfx.make_shader(&shader_desc)
-	}
-
-	window.pip.gradient = sgl.make_pipeline(&desc)
+	window.pip.gradient = make_gui_builtin_sgl_pipeline(c'gradient_pip',
+		gfx.make_shader(voidptr(C.gui_gradient_shader_desc(gfx.query_backend()))))
 }
 
 // draw_shadow_rect draws a rounded rectangle drop shadow.
@@ -998,6 +457,12 @@ fn init_custom_pipeline(shader &Shader, mut window Window) sgl.Pipeline {
 	if pip := window.pip.custom[key] {
 		return pip
 	}
+	$if windows && sokol_d3d11 ? {
+		log.warn('custom GLSL/Metal shaders are not supported with -d sokol_d3d11; using rounded-rect fallback')
+		pip := sgl.Pipeline{}
+		window.pip.custom[key] = pip
+		return pip
+	}
 
 	mut attrs := [16]gfx.VertexAttrDesc{}
 	attrs[0] = gfx.VertexAttrDesc{
@@ -1159,6 +624,12 @@ pub fn draw_custom_shader_rect(x f32, y f32, w f32, h f32, radius f32, c gg.Colo
 	}
 
 	pip := init_custom_pipeline(shader, mut window)
+	if pip.id == 0 {
+		$if windows && sokol_d3d11 ? {
+			draw_rounded_rect_filled(x, y, w, h, radius, c, mut window)
+		}
+		return
+	}
 
 	// Load user params into tm matrix
 	sgl.matrix_mode_texture()
@@ -1212,364 +683,15 @@ fn ortho_column_major(l f32, r f32, b f32, t f32, n f32, f f32) [16]f32 {
 }
 
 // make_filter_gfx_pipeline creates a raw gfx.Pipeline for offscreen
-// rendering (blur passes). Uses images/samplers for texture sampling.
-fn make_filter_gfx_pipeline(vs_src string, fs_src string, vs_entry &u8, fs_entry &u8, glsl_sampler_name &u8) gfx.Pipeline {
-	mut attrs := [16]gfx.VertexAttrDesc{}
-	attrs[0] = gfx.VertexAttrDesc{
-		format: .float3
-		offset: 0
-	}
-	attrs[1] = gfx.VertexAttrDesc{
-		format: .float2
-		offset: 12
-	}
-	attrs[2] = gfx.VertexAttrDesc{
-		format: .ubyte4n
-		offset: 20
-	}
-	mut buffers := [8]gfx.VertexBufferLayoutState{}
-	buffers[0] = gfx.VertexBufferLayoutState{
-		stride: 24
-	}
-	layout := gfx.VertexLayoutState{
-		attrs:   attrs
-		buffers: buffers
-	}
-
-	mut shader_attrs := [16]gfx.ShaderAttrDesc{}
-	shader_attrs[0] = gfx.ShaderAttrDesc{
-		name:     c'position'
-		sem_name: c'POSITION'
-	}
-	shader_attrs[1] = gfx.ShaderAttrDesc{
-		name:      c'texcoord0'
-		sem_name:  c'TEXCOORD'
-		sem_index: 0
-	}
-	shader_attrs[2] = gfx.ShaderAttrDesc{
-		name:      c'color0'
-		sem_name:  c'COLOR'
-		sem_index: 0
-	}
-
-	mut ub_uniforms := [16]gfx.ShaderUniformDesc{}
-	ub_uniforms[0] = gfx.ShaderUniformDesc{
-		name:        c'mvp'
-		@type:       .mat4
-		array_count: 1
-	}
-	ub_uniforms[1] = gfx.ShaderUniformDesc{
-		name:        c'tm'
-		@type:       .mat4
-		array_count: 1
-	}
-	mut ub := [4]gfx.ShaderUniformBlockDesc{}
-	ub[0] = gfx.ShaderUniformBlockDesc{
-		size:     128
-		uniforms: ub_uniforms
-	}
-
-	mut colors := [4]gfx.ColorTargetState{}
-	colors[0] = gfx.ColorTargetState{
-		blend:      gfx.BlendState{
-			enabled:          true
-			src_factor_rgb:   .src_alpha
-			dst_factor_rgb:   .one_minus_src_alpha
-			src_factor_alpha: .one
-			dst_factor_alpha: .one_minus_src_alpha
-		}
-		write_mask: .rgba
-	}
-
-	mut shader_images := [12]gfx.ShaderImageDesc{}
-	shader_images[0] = gfx.ShaderImageDesc{
-		used:        true
-		image_type:  ._2d
-		sample_type: .float
-	}
-	mut shader_samplers := [8]gfx.ShaderSamplerDesc{}
-	shader_samplers[0] = gfx.ShaderSamplerDesc{
-		used:         true
-		sampler_type: .filtering
-	}
-	mut shader_image_sampler_pairs := [12]gfx.ShaderImageSamplerPairDesc{}
-	unsafe {
-		shader_image_sampler_pairs[0] = gfx.ShaderImageSamplerPairDesc{
-			used:         true
-			image_slot:   0
-			sampler_slot: 0
-			glsl_name:    glsl_sampler_name
-		}
-	}
-	mut shader_desc := gfx.ShaderDesc{
-		attrs: shader_attrs
-	}
-	$if macos {
-		unsafe {
-			shader_desc.vs = gfx.ShaderStageDesc{
-				source:         vs_src.str
-				entry:          vs_entry
-				uniform_blocks: ub
-			}
-			shader_desc.fs = gfx.ShaderStageDesc{
-				source:              fs_src.str
-				entry:               fs_entry
-				images:              shader_images
-				samplers:            shader_samplers
-				image_sampler_pairs: shader_image_sampler_pairs
-			}
-		}
-	} $else {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_src.str
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_src.str
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	}
-
-	return gfx.make_pipeline(&gfx.PipelineDesc{
-		label:  c'filter_gfx_pip'
-		layout: layout
-		colors: colors
-		shader: gfx.make_shader(&shader_desc)
-	})
-}
-
-// make_content_gfx_pipeline creates a raw gfx.Pipeline for rendering
-// colored triangles to offscreen texture (no texture sampling).
-fn make_content_gfx_pipeline(vs_src string, fs_src string, vs_entry &u8, fs_entry &u8) gfx.Pipeline {
-	mut attrs := [16]gfx.VertexAttrDesc{}
-	attrs[0] = gfx.VertexAttrDesc{
-		format: .float3
-		offset: 0
-	}
-	attrs[1] = gfx.VertexAttrDesc{
-		format: .float2
-		offset: 12
-	}
-	attrs[2] = gfx.VertexAttrDesc{
-		format: .ubyte4n
-		offset: 20
-	}
-	mut buffers := [8]gfx.VertexBufferLayoutState{}
-	buffers[0] = gfx.VertexBufferLayoutState{
-		stride: 24
-	}
-	layout := gfx.VertexLayoutState{
-		attrs:   attrs
-		buffers: buffers
-	}
-
-	mut shader_attrs := [16]gfx.ShaderAttrDesc{}
-	shader_attrs[0] = gfx.ShaderAttrDesc{
-		name:     c'position'
-		sem_name: c'POSITION'
-	}
-	shader_attrs[1] = gfx.ShaderAttrDesc{
-		name:      c'texcoord0'
-		sem_name:  c'TEXCOORD'
-		sem_index: 0
-	}
-	shader_attrs[2] = gfx.ShaderAttrDesc{
-		name:      c'color0'
-		sem_name:  c'COLOR'
-		sem_index: 0
-	}
-
-	mut ub_uniforms := [16]gfx.ShaderUniformDesc{}
-	ub_uniforms[0] = gfx.ShaderUniformDesc{
-		name:        c'mvp'
-		@type:       .mat4
-		array_count: 1
-	}
-	ub_uniforms[1] = gfx.ShaderUniformDesc{
-		name:        c'tm'
-		@type:       .mat4
-		array_count: 1
-	}
-	mut ub := [4]gfx.ShaderUniformBlockDesc{}
-	ub[0] = gfx.ShaderUniformBlockDesc{
-		size:     128
-		uniforms: ub_uniforms
-	}
-
-	mut colors := [4]gfx.ColorTargetState{}
-	colors[0] = gfx.ColorTargetState{
-		blend:      gfx.BlendState{
-			enabled:          true
-			src_factor_rgb:   .src_alpha
-			dst_factor_rgb:   .one_minus_src_alpha
-			src_factor_alpha: .one
-			dst_factor_alpha: .one_minus_src_alpha
-		}
-		write_mask: .rgba
-	}
-
-	mut shader_desc := gfx.ShaderDesc{
-		attrs: shader_attrs
-	}
-	$if macos {
-		unsafe {
-			shader_desc.vs = gfx.ShaderStageDesc{
-				source:         vs_src.str
-				entry:          vs_entry
-				uniform_blocks: ub
-			}
-			shader_desc.fs = gfx.ShaderStageDesc{
-				source: fs_src.str
-				entry:  fs_entry
-			}
-		}
-	} $else {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_src.str
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source: fs_src.str
-		}
-	}
-
-	return gfx.make_pipeline(&gfx.PipelineDesc{
-		label:  c'content_gfx_pip'
-		layout: layout
-		colors: colors
-		shader: gfx.make_shader(&shader_desc)
-	})
+// rendering using the generated built-in shader descriptors.
+fn make_filter_gfx_pipeline(label &char, shader gfx.Shader) gfx.Pipeline {
+	return make_gui_builtin_gfx_pipeline(label, shader)
 }
 
 // make_filter_sgl_pipeline creates an SGL pipeline for compositing
 // the blurred result onto the swapchain.
-fn make_filter_sgl_pipeline(ctx sgl.Context, vs_src string, fs_src string, vs_entry &u8, fs_entry &u8, glsl_sampler_name &u8) sgl.Pipeline {
-	mut attrs := [16]gfx.VertexAttrDesc{}
-	attrs[0] = gfx.VertexAttrDesc{
-		format: .float3
-		offset: 0
-	}
-	attrs[1] = gfx.VertexAttrDesc{
-		format: .float2
-		offset: 12
-	}
-	attrs[2] = gfx.VertexAttrDesc{
-		format: .ubyte4n
-		offset: 20
-	}
-	mut buffers := [8]gfx.VertexBufferLayoutState{}
-	buffers[0] = gfx.VertexBufferLayoutState{
-		stride: 24
-	}
-	layout := gfx.VertexLayoutState{
-		attrs:   attrs
-		buffers: buffers
-	}
-
-	mut shader_attrs := [16]gfx.ShaderAttrDesc{}
-	shader_attrs[0] = gfx.ShaderAttrDesc{
-		name:     c'position'
-		sem_name: c'POSITION'
-	}
-	shader_attrs[1] = gfx.ShaderAttrDesc{
-		name:      c'texcoord0'
-		sem_name:  c'TEXCOORD'
-		sem_index: 0
-	}
-	shader_attrs[2] = gfx.ShaderAttrDesc{
-		name:      c'color0'
-		sem_name:  c'COLOR'
-		sem_index: 0
-	}
-
-	mut ub_uniforms := [16]gfx.ShaderUniformDesc{}
-	ub_uniforms[0] = gfx.ShaderUniformDesc{
-		name:        c'mvp'
-		@type:       .mat4
-		array_count: 1
-	}
-	ub_uniforms[1] = gfx.ShaderUniformDesc{
-		name:        c'tm'
-		@type:       .mat4
-		array_count: 1
-	}
-	mut ub := [4]gfx.ShaderUniformBlockDesc{}
-	ub[0] = gfx.ShaderUniformBlockDesc{
-		size:     128
-		uniforms: ub_uniforms
-	}
-
-	mut colors := [4]gfx.ColorTargetState{}
-	colors[0] = gfx.ColorTargetState{
-		blend:      gfx.BlendState{
-			enabled:          true
-			src_factor_rgb:   .src_alpha
-			dst_factor_rgb:   .one_minus_src_alpha
-			src_factor_alpha: .one
-			dst_factor_alpha: .one_minus_src_alpha
-		}
-		write_mask: .rgba
-	}
-
-	mut shader_images := [12]gfx.ShaderImageDesc{}
-	shader_images[0] = gfx.ShaderImageDesc{
-		used:        true
-		image_type:  ._2d
-		sample_type: .float
-	}
-	mut shader_samplers := [8]gfx.ShaderSamplerDesc{}
-	shader_samplers[0] = gfx.ShaderSamplerDesc{
-		used:         true
-		sampler_type: .filtering
-	}
-	mut shader_image_sampler_pairs := [12]gfx.ShaderImageSamplerPairDesc{}
-	unsafe {
-		shader_image_sampler_pairs[0] = gfx.ShaderImageSamplerPairDesc{
-			used:         true
-			image_slot:   0
-			sampler_slot: 0
-			glsl_name:    glsl_sampler_name
-		}
-	}
-	mut shader_desc := gfx.ShaderDesc{
-		attrs: shader_attrs
-	}
-	$if macos {
-		unsafe {
-			shader_desc.vs = gfx.ShaderStageDesc{
-				source:         vs_src.str
-				entry:          vs_entry
-				uniform_blocks: ub
-			}
-			shader_desc.fs = gfx.ShaderStageDesc{
-				source:              fs_src.str
-				entry:               fs_entry
-				images:              shader_images
-				samplers:            shader_samplers
-				image_sampler_pairs: shader_image_sampler_pairs
-			}
-		}
-	} $else {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_src.str
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_src.str
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	}
-
-	return sgl.context_make_pipeline(ctx, &gfx.PipelineDesc{
-		label:  c'filter_sgl_pip'
-		layout: layout
-		colors: colors
-		shader: gfx.make_shader(&shader_desc)
-	})
+fn make_filter_sgl_pipeline(ctx sgl.Context, label &char, shader gfx.Shader) sgl.Pipeline {
+	return make_gui_builtin_sgl_context_pipeline(ctx, label, shader)
 }
 
 // ensure_filter_state lazily initializes offscreen filter resources.
@@ -1587,31 +709,17 @@ fn ensure_filter_state(mut window Window) {
 	})
 
 	// Blur/content pipelines: raw gfx (offscreen passes)
-	$if macos {
-		window.filter_state.blur_h_pip = make_filter_gfx_pipeline(vs_filter_blur_metal,
-			fs_filter_blur_h_metal, c'vs_main', c'fs_main', c'tex')
-		window.filter_state.blur_v_pip = make_filter_gfx_pipeline(vs_filter_blur_metal,
-			fs_filter_blur_v_metal, c'vs_main', c'fs_main', c'tex')
-		window.filter_state.content_pip = make_content_gfx_pipeline(vs_filter_blur_metal,
-			fs_filter_color_metal, c'vs_main', c'fs_main')
-	} $else {
-		window.filter_state.blur_h_pip = make_filter_gfx_pipeline(vs_filter_blur_glsl,
-			fs_filter_blur_h_glsl, c'', c'', c'tex_smp')
-		window.filter_state.blur_v_pip = make_filter_gfx_pipeline(vs_filter_blur_glsl,
-			fs_filter_blur_v_glsl, c'', c'', c'tex_smp')
-		window.filter_state.content_pip = make_content_gfx_pipeline(vs_filter_blur_glsl,
-			fs_filter_color_glsl, c'', c'')
-	}
+	window.filter_state.blur_h_pip = make_filter_gfx_pipeline(c'filter_blur_h_pip',
+		gfx.make_shader(voidptr(C.gui_filter_blur_h_shader_desc(gfx.query_backend()))))
+	window.filter_state.blur_v_pip = make_filter_gfx_pipeline(c'filter_blur_v_pip',
+		gfx.make_shader(voidptr(C.gui_filter_blur_v_shader_desc(gfx.query_backend()))))
+	window.filter_state.content_pip = make_filter_gfx_pipeline(c'filter_content_pip',
+		gfx.make_shader(voidptr(C.gui_filter_color_shader_desc(gfx.query_backend()))))
 
 	// Composite pipeline: SGL (swapchain pass)
 	ctx := sgl.default_context()
-	$if macos {
-		window.filter_state.texture_quad_pip = make_filter_sgl_pipeline(ctx, vs_filter_blur_metal,
-			fs_filter_texture_metal, c'vs_main', c'fs_main', c'tex')
-	} $else {
-		window.filter_state.texture_quad_pip = make_filter_sgl_pipeline(ctx, vs_filter_blur_glsl,
-			fs_filter_texture_glsl, c'', c'', c'tex_smp')
-	}
+	window.filter_state.texture_quad_pip = make_filter_sgl_pipeline(ctx, c'filter_texture_pip',
+		gfx.make_shader(voidptr(C.gui_filter_texture_shader_desc(gfx.query_backend()))))
 
 	// Static unit quad for blur fullscreen passes (6 vertices)
 	quad_verts := [
@@ -1656,14 +764,13 @@ fn ensure_filter_textures(mut window Window, width int, height int) bool {
 		gfx.destroy_attachments(window.filter_state.att_b)
 	}
 
-	color_fmt := gfx.PixelFormat.from(sapp.color_format()) or { gfx.PixelFormat.bgra8 }
-	depth_fmt := gfx.PixelFormat.from(sapp.depth_format()) or { gfx.PixelFormat.depth_stencil }
+	formats := gui_render_target_formats()
 
 	img_desc := gfx.ImageDesc{
 		render_target: true
 		width:         w
 		height:        h
-		pixel_format:  color_fmt
+		pixel_format:  formats.color
 		label:         c'filter_tex'
 	}
 	tex_a := gfx.make_image(&img_desc)
@@ -1674,7 +781,7 @@ fn ensure_filter_textures(mut window Window, width int, height int) bool {
 		render_target: true
 		width:         w
 		height:        h
-		pixel_format:  depth_fmt
+		pixel_format:  formats.depth
 		label:         c'filter_depth'
 	})
 	if tex_a.id == 0 || tex_b.id == 0 || depth.id == 0 {
@@ -1767,138 +874,8 @@ fn init_image_clip_pipeline(mut window Window) bool {
 	if window.pip.image_clip_init_failed {
 		return false
 	}
-
-	mut attrs := [16]gfx.VertexAttrDesc{}
-	attrs[0] = gfx.VertexAttrDesc{
-		format:       .float3
-		offset:       0
-		buffer_index: 0
-	}
-	attrs[1] = gfx.VertexAttrDesc{
-		format:       .float2
-		offset:       12
-		buffer_index: 0
-	}
-	attrs[2] = gfx.VertexAttrDesc{
-		format:       .ubyte4n
-		offset:       20
-		buffer_index: 0
-	}
-
-	mut buffers := [8]gfx.VertexBufferLayoutState{}
-	buffers[0] = gfx.VertexBufferLayoutState{
-		stride: 24
-	}
-
-	mut shader_attrs := [16]gfx.ShaderAttrDesc{}
-	shader_attrs[0] = gfx.ShaderAttrDesc{
-		name:      c'position'
-		sem_name:  c'POSITION'
-		sem_index: 0
-	}
-	shader_attrs[1] = gfx.ShaderAttrDesc{
-		name:      c'texcoord0'
-		sem_name:  c'TEXCOORD'
-		sem_index: 0
-	}
-	shader_attrs[2] = gfx.ShaderAttrDesc{
-		name:      c'color0'
-		sem_name:  c'COLOR'
-		sem_index: 0
-	}
-
-	mut ub_uniforms := [16]gfx.ShaderUniformDesc{}
-	ub_uniforms[0] = gfx.ShaderUniformDesc{
-		name:        c'mvp'
-		@type:       .mat4
-		array_count: 1
-	}
-	ub_uniforms[1] = gfx.ShaderUniformDesc{
-		name:        c'tm'
-		@type:       .mat4
-		array_count: 1
-	}
-
-	mut ub := [4]gfx.ShaderUniformBlockDesc{}
-	ub[0] = gfx.ShaderUniformBlockDesc{
-		size:     128
-		uniforms: ub_uniforms
-	}
-
-	mut colors := [4]gfx.ColorTargetState{}
-	colors[0] = gfx.ColorTargetState{
-		blend:      gfx.BlendState{
-			enabled:          true
-			src_factor_rgb:   .src_alpha
-			dst_factor_rgb:   .one_minus_src_alpha
-			src_factor_alpha: .one
-			dst_factor_alpha: .one_minus_src_alpha
-		}
-		write_mask: .rgba
-	}
-
-	mut shader_images := [12]gfx.ShaderImageDesc{}
-	shader_images[0] = gfx.ShaderImageDesc{
-		used:        true
-		image_type:  ._2d
-		sample_type: .float
-	}
-
-	mut shader_samplers := [8]gfx.ShaderSamplerDesc{}
-	shader_samplers[0] = gfx.ShaderSamplerDesc{
-		used:         true
-		sampler_type: .filtering
-	}
-
-	mut shader_image_sampler_pairs := [12]gfx.ShaderImageSamplerPairDesc{}
-	shader_image_sampler_pairs[0] = gfx.ShaderImageSamplerPairDesc{
-		used:         true
-		image_slot:   0
-		sampler_slot: 0
-		glsl_name:    c'tex'
-	}
-
-	mut shader_desc := gfx.ShaderDesc{
-		attrs: shader_attrs
-	}
-
-	$if macos {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_metal.str
-			entry:          c'vs_main'
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_image_clip_metal.str
-			entry:               c'fs_main'
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	} $else {
-		shader_desc.vs = gfx.ShaderStageDesc{
-			source:         vs_glsl.str
-			uniform_blocks: ub
-		}
-		shader_desc.fs = gfx.ShaderStageDesc{
-			source:              fs_image_clip_glsl.str
-			images:              shader_images
-			samplers:            shader_samplers
-			image_sampler_pairs: shader_image_sampler_pairs
-		}
-	}
-
-	desc := gfx.PipelineDesc{
-		label:  c'image_clip_pip'
-		colors: colors
-		layout: gfx.VertexLayoutState{
-			attrs:   attrs
-			buffers: buffers
-		}
-		shader: gfx.make_shader(&shader_desc)
-	}
-
-	window.pip.image_clip = sgl.make_pipeline(&desc)
+	window.pip.image_clip = make_gui_builtin_sgl_pipeline(c'image_clip_pip',
+		gfx.make_shader(voidptr(C.gui_image_clip_shader_desc(gfx.query_backend()))))
 	if window.pip.image_clip.id == 0 {
 		window.pip.image_clip_init_failed = true
 		return false

@@ -15,6 +15,10 @@ on:
         description: "Also run exploratory MinGW/MSYS2 smoke"
         type: boolean
         default: false
+      run_d3d11:
+        description: "Also compile D3D11 probes; requires a V build with -d sokol_d3d11 support"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
@@ -280,6 +284,29 @@ jobs:
           v -no-parallel -cc msvc -W -o dialogs_smoke.exe gui/examples/dialogs.v
           v -no-parallel -cc msvc -W -o printing_smoke.exe gui/examples/printing.v
           v -no-parallel -cc msvc -W -o notification_smoke.exe gui/examples/native_notification.v
+          if ('${{ inputs.run_d3d11 }}' -eq 'true') {
+            $d3dExamples = @(
+              @{ Name = 'printing'; Path = 'gui/examples/printing.v'; Warn = $true },
+              @{ Name = 'gradient_demo'; Path = 'gui/examples/gradient_demo.v'; Warn = $true },
+              @{ Name = 'shadow_demo'; Path = 'gui/examples/shadow_demo.v'; Warn = $true },
+              @{ Name = 'blur_demo'; Path = 'gui/examples/blur_demo.v'; Warn = $true },
+              @{ Name = 'image_clip'; Path = 'gui/examples/image_clip.v'; Warn = $true },
+              @{ Name = 'svg_demo'; Path = 'gui/examples/svg_demo.v'; Warn = $true },
+              @{ Name = 'custom_shader'; Path = 'gui/examples/custom_shader.v'; Warn = $true },
+              @{ Name = 'showcase'; Path = 'gui/examples/showcase.v'; Warn = $false }
+            )
+            foreach ($example in $d3dExamples) {
+              $args = @('-no-parallel', '-cc', 'msvc', '-d', 'sokol_d3d11')
+              if ($example.Warn) {
+                $args += '-W'
+              }
+              $args += @('-o', "$($example.Name)_d3d11_smoke.exe", $example.Path)
+              v @args
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+          }
 
   clang:
     name: Clang native smoke (exploratory)
@@ -348,6 +375,29 @@ jobs:
           v -no-parallel -cc clang -W -o dialogs_smoke.exe gui/examples/dialogs.v
           v -no-parallel -cc clang -W -o printing_smoke.exe gui/examples/printing.v
           v -no-parallel -cc clang -W -o notification_smoke.exe gui/examples/native_notification.v
+          if ('${{ inputs.run_d3d11 }}' -eq 'true') {
+            $d3dExamples = @(
+              @{ Name = 'printing'; Path = 'gui/examples/printing.v'; Warn = $true },
+              @{ Name = 'gradient_demo'; Path = 'gui/examples/gradient_demo.v'; Warn = $true },
+              @{ Name = 'shadow_demo'; Path = 'gui/examples/shadow_demo.v'; Warn = $true },
+              @{ Name = 'blur_demo'; Path = 'gui/examples/blur_demo.v'; Warn = $true },
+              @{ Name = 'image_clip'; Path = 'gui/examples/image_clip.v'; Warn = $true },
+              @{ Name = 'svg_demo'; Path = 'gui/examples/svg_demo.v'; Warn = $true },
+              @{ Name = 'custom_shader'; Path = 'gui/examples/custom_shader.v'; Warn = $true },
+              @{ Name = 'showcase'; Path = 'gui/examples/showcase.v'; Warn = $false }
+            )
+            foreach ($example in $d3dExamples) {
+              $args = @('-no-parallel', '-cc', 'clang', '-d', 'sokol_d3d11')
+              if ($example.Warn) {
+                $args += '-W'
+              }
+              $args += @('-o', "$($example.Name)_d3d11_smoke.exe", $example.Path)
+              v @args
+              if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+              }
+            }
+          }
 
   mingw:
     name: MinGW native smoke (exploratory)
@@ -424,3 +474,26 @@ jobs:
           v -no-parallel -cc gcc -W -o dialogs_smoke.exe gui/examples/dialogs.v
           v -no-parallel -cc gcc -W -o printing_smoke.exe gui/examples/printing.v
           v -no-parallel -cc gcc -W -o notification_smoke.exe gui/examples/native_notification.v
+          if [ '${{ inputs.run_d3d11 }}' = 'true' ]; then
+            for item in \
+              'printing:gui/examples/printing.v:-W' \
+              'gradient_demo:gui/examples/gradient_demo.v:-W' \
+              'shadow_demo:gui/examples/shadow_demo.v:-W' \
+              'blur_demo:gui/examples/blur_demo.v:-W' \
+              'image_clip:gui/examples/image_clip.v:-W' \
+              'svg_demo:gui/examples/svg_demo.v:-W' \
+              'custom_shader:gui/examples/custom_shader.v:-W' \
+              'showcase:gui/examples/showcase.v:'
+            do
+              IFS=':' read -r name path warn_flag <<< "$item"
+              args=(-no-parallel -cc gcc -d sokol_d3d11)
+              if [ -n "$warn_flag" ]; then
+                args+=("$warn_flag")
+              fi
+              args+=(-o "${name}_d3d11_smoke.exe" "$path")
+              v "${args[@]}"
+              if [ "$?" -ne 0 ]; then
+                exit 1
+              fi
+            done
+          fi
