@@ -12,6 +12,7 @@ uniform gui_rect_vs_params {
 in vec3 position;
 in vec2 texcoord0;
 in vec4 color0;
+in float psize;
 
 out vec2 uv;
 out vec4 color;
@@ -19,6 +20,7 @@ out float params;
 
 void main() {
     gl_Position = mvp * vec4(position.xy, 0.0, 1.0);
+    gl_PointSize = psize;
     uv = texcoord0;
     color = color0;
     params = position.z;
@@ -34,6 +36,7 @@ uniform gui_shadow_vs_params {
 in vec3 position;
 in vec2 texcoord0;
 in vec4 color0;
+in float psize;
 
 out vec2 uv;
 out vec4 color;
@@ -42,6 +45,7 @@ out vec2 offset;
 
 void main() {
     gl_Position = mvp * vec4(position.xy, 0.0, 1.0);
+    gl_PointSize = psize;
     uv = texcoord0;
     color = color0;
     params = position.z;
@@ -58,6 +62,7 @@ uniform gui_gradient_vs_params {
 in vec3 position;
 in vec2 texcoord0;
 in vec4 color0;
+in float psize;
 
 out vec2 uv;
 out vec4 color;
@@ -69,6 +74,7 @@ out vec4 meta;
 
 void main() {
     gl_Position = mvp * vec4(position.xy, 0.0, 1.0);
+    gl_PointSize = psize;
     uv = texcoord0;
     color = color0;
     params = position.z;
@@ -95,6 +101,30 @@ out float std_dev;
 
 void main() {
     gl_Position = mvp * vec4(position.xy, 0.0, 1.0);
+    uv = texcoord0;
+    color = color0;
+    std_dev = tm[0][0];
+}
+@end
+
+@vs gui_filter_sgl_vs
+uniform gui_filter_sgl_vs_params {
+    mat4 mvp;
+    mat4 tm;
+};
+
+in vec3 position;
+in vec2 texcoord0;
+in vec4 color0;
+in float psize;
+
+out vec2 uv;
+out vec4 color;
+out float std_dev;
+
+void main() {
+    gl_Position = mvp * vec4(position.xy, 0.0, 1.0);
+    gl_PointSize = psize;
     uv = texcoord0;
     color = color0;
     std_dev = tm[0][0];
@@ -479,4 +509,4 @@ void main() {
 @program gui_filter_blur_h gui_filter_vs gui_filter_blur_h_fs
 @program gui_filter_blur_v gui_filter_vs gui_filter_blur_v_fs
 @program gui_filter_color gui_filter_vs gui_filter_color_fs
-@program gui_filter_texture gui_filter_vs gui_filter_texture_fs
+@program gui_filter_texture gui_filter_sgl_vs gui_filter_texture_fs

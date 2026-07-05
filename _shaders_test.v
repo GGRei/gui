@@ -29,11 +29,17 @@ fn generated_shader_programs() []string {
 	]
 }
 
-fn generated_shader_vertex_stages() []string {
+fn generated_shader_sgl_vertex_stages() []string {
 	return [
 		'gui_rect_vs',
 		'gui_shadow_vs',
 		'gui_gradient_vs',
+		'gui_filter_sgl_vs',
+	]
+}
+
+fn generated_shader_raw_vertex_stages() []string {
+	return [
 		'gui_filter_vs',
 	]
 }
@@ -108,6 +114,7 @@ fn test_generated_builtin_shader_header_has_d3d11_descriptor_coverage() {
 	assert header.contains('gui_shadow_vs_source_hlsl4')
 	assert header.contains('gui_gradient_vs_source_hlsl4')
 	assert header.contains('gui_filter_vs_source_hlsl4')
+	assert header.contains('gui_filter_sgl_vs_source_hlsl4')
 	assert header.contains('gui_filter_texture_fs_source_hlsl4')
 }
 
@@ -136,14 +143,30 @@ fn test_generated_builtin_shader_header_uses_current_glcore_target() {
 
 fn test_generated_builtin_shader_header_keeps_sgl_binding_contracts() {
 	header := read_generated_shader_header()
-	for stage in generated_shader_vertex_stages() {
+	for stage in generated_shader_sgl_vertex_stages() {
 		assert header.contains('#define ATTR_${stage}_position (0)')
 		assert header.contains('#define ATTR_${stage}_texcoord0 (1)')
 		assert header.contains('#define ATTR_${stage}_color0 (2)')
+		assert header.contains('#define ATTR_${stage}_psize (3)')
 		assert header.contains('#define SLOT_${stage}_params (0)')
 	}
+	assert count_occurrences(header, 'desc.attrs[3].name = "psize";') == 6
+	assert count_occurrences(header, 'desc.attrs[3].sem_name = "TEXCOORD";') == 6
+	assert count_occurrences(header, 'desc.attrs[3].sem_index = 3;') == 6
+	assert header.contains('desc.vs.source = (const char*)gui_filter_sgl_vs_source_hlsl4;')
 	assert header.contains('#define SLOT_tex (0)')
 	assert header.contains('#define SLOT_smp (0)')
+}
+
+fn test_generated_builtin_shader_header_keeps_raw_filter_binding_contract() {
+	header := read_generated_shader_header()
+	for stage in generated_shader_raw_vertex_stages() {
+		assert header.contains('#define ATTR_${stage}_position (0)')
+		assert header.contains('#define ATTR_${stage}_texcoord0 (1)')
+		assert header.contains('#define ATTR_${stage}_color0 (2)')
+		assert !header.contains('#define ATTR_${stage}_psize (3)')
+		assert header.contains('#define SLOT_${stage}_params (0)')
+	}
 }
 
 fn test_d3d11_custom_shader_guard_returns_before_runtime_source_pipeline() {
