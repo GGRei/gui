@@ -67,6 +67,9 @@ pub mut:
 	wrap                  bool                 // If true, children wrap to next line when exceeding width
 	overflow              bool                 // If true, overflow panel hides non-fitting children
 	opacity               f32 = 1.0 // Opacity multiplier (0.0 = transparent, 1.0 = opaque)
+mut:
+	// Internal child metadata. Zero means that no explicit weight was assigned.
+	main_axis_weight f32
 }
 
 // ShapeTextConfig holds text/RTF-specific fields for a Shape.

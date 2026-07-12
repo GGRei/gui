@@ -22,6 +22,8 @@ const clear_allowlist = [
 	ClearAllowEntry{'scratch_pools.v', 'out.clear()'},
 	ClearAllowEntry{'render_svg.v', 'out.clear()'},
 	ClearAllowEntry{'svg/animation.v', 'out.clear()'},
+	// []f64 (no pointers)
+	ClearAllowEntry{'layout_sizing.v', 'scratch.weights.clear()'},
 	// []int
 	ClearAllowEntry{'layout_sizing.v', 'fill_indices.clear()'},
 	ClearAllowEntry{'layout_sizing.v', 'fixed_indices.clear()'},

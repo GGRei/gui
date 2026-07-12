@@ -112,6 +112,60 @@ gui.column(
 )
 ```
 
+## Weighted Children
+
+Use `gui.weighted` to assign a direct child a proportional share of its
+parent's main-axis space. The main axis is horizontal for `row` and vertical
+for `column` and `circle`.
+
+```v ignore
+gui.row(
+    sizing:  gui.fill_fill
+    spacing: 8
+    content: [
+        gui.weighted(weight: 1, view: gui.text(text: 'One quarter')),
+        gui.weighted(weight: 1, view: gui.text(text: 'One quarter')),
+        gui.weighted(weight: 2, view: gui.text(text: 'One half')),
+    ]
+)
+```
+
+The three text views use their default `.fit` sizing, but receive `1:1:2` of
+the distributable width: 25%, 25%, and 50%. Padding, spacing, and the final
+sizes of non-participating children are reserved before that space is divided.
+The proportions are recalculated whenever the parent is resized.
+
+An explicit weight activates weighted distribution for that parent. Decorated
+`.fit` and `.fill` children participate with their configured weights, and an
+undecorated `.fill` sibling participates with an implicit weight of `1`.
+Undecorated `.fit` and `.fixed` siblings keep their constrained sizes and do
+not participate. Without an explicit weight, the existing fill sizing path is
+unchanged.
+
+Weighted sizes are final main-axis sizes, not growth deltas. Each participating
+child receives `clamp(lambda * weight, min, max)`, with constrained space
+redistributed among the remaining participants. A zero maximum means no
+maximum. If minima cannot fit, the children keep their minima and overflow;
+use the existing `clip` or scrolling options when containment is required. If
+all maxima are reached, normal parent alignment handles the surplus. Cross-axis
+sizing, alignment, RTL positioning, nesting, clipping, and scrolling keep their
+existing behavior.
+
+Weights must be finite and greater than zero. The following configurations
+panic instead of silently ignoring or changing a weight:
+
+- zero, negative, NaN, or infinite weights;
+- decorating a view more than once;
+- using `gui.weighted(...)` as the root view rather than as a child;
+- a decorated root that is floating, `.none`, or `over_draw`;
+- a decorated child whose main-axis sizing is `.fixed`;
+- a weighted child of a parent without a main axis, such as `canvas`;
+- a weighted group directly inside a `wrap` or overflow parent.
+
+A `wrap` or overflow container may itself be weighted when it is a child of a
+normal row or column. The restriction applies only to a weighted group directly
+managed by that container.
+
 ## Alignment
 
 `h_align` controls alignment **along** the horizontal axis.
@@ -434,6 +488,7 @@ gui.column(id: 'panel', hero: true, content: [...])
 
 - `view_container.v` — `ContainerCfg`, `column`, `row`, `wrap`,
   `canvas`, `circle`
+- `view_weighted.v` — `WeightedCfg`, `weighted`
 - `sizing.v` — `Sizing`, `SizingType`, preset constants
 - `alignment.v` — `Axis`, `HorizontalAlign`, `VerticalAlign`
 - `padding.v` — `Padding`, `padding()`, `pad_all()`, `pad_tblr()`
@@ -451,3 +506,4 @@ gui.column(id: 'panel', hero: true, content: [...])
 - `examples/column_scroll.v` — scrollable column with 10,000-item list
 - `examples/overflow_panel_demo.v` — responsive toolbar with overflow
   trigger menu
+- `examples/weighted_layout.v` — resizable `1:1:2` weighted button layout

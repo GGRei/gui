@@ -22,6 +22,7 @@ struct DistributeScratch {
 mut:
 	candidates                 []int
 	fixed_indices              []int
+	weights                    []f64
 	parent_total_child_widths  map[u64]f32
 	parent_total_child_heights map[u64]f32
 }
@@ -37,6 +38,15 @@ fn (mut scratch DistributeScratch) ensure_cap(size int) {
 		scratch.fixed_indices = []int{cap: size}
 	} else {
 		scratch.fixed_indices.clear()
+	}
+}
+
+@[inline]
+fn (mut scratch DistributeScratch) prepare_weights(size int) {
+	if scratch.weights.cap < size {
+		scratch.weights = []f64{cap: size}
+	} else {
+		scratch.weights.clear()
 	}
 }
 
@@ -80,6 +90,14 @@ fn get_sizing(shape &Shape, axis DistributeAxis) SizingType {
 	return match axis {
 		.horizontal { shape.sizing.width }
 		.vertical { shape.sizing.height }
+	}
+}
+
+@[inline]
+fn get_padding_size(shape &Shape, axis DistributeAxis) f32 {
+	return match axis {
+		.horizontal { shape.padding_width() }
+		.vertical { shape.padding_height() }
 	}
 }
 
@@ -321,6 +339,182 @@ fn distribute_space(mut layout Layout,
 	return state.remaining
 }
 
+const weighted_root_error = 'gui.weighted: weighted view requires a parent with a main axis'
+const weighted_parent_axis_error = 'gui.weighted: weighted children require a parent with a main axis'
+const weighted_parent_flow_error = 'gui.weighted: weighted children are not supported in wrap or overflow containers'
+const weighted_fixed_error = 'gui.weighted: weighted child cannot use fixed sizing on its parent main axis'
+
+@[inline]
+fn validate_weighted_root(layout &Layout) {
+	if layout.parent == unsafe { nil } && layout.shape.main_axis_weight > 0 {
+		panic(weighted_root_error)
+	}
+}
+
+fn is_weighted_flow_child(child &Layout) bool {
+	return !child.shape.float && child.shape.shape_type != .none && !child.shape.over_draw
+}
+
+// distribute_weighted_space assigns final main-axis sizes using constrained
+// proportional water-filling. candidates and weights stay paired by index.
+fn distribute_weighted_space(mut layout Layout, axis DistributeAxis, mut scratch DistributeScratch) {
+	if layout.shape.axis != .left_to_right && layout.shape.axis != .top_to_bottom {
+		panic(weighted_parent_axis_error)
+	}
+	if layout.shape.wrap || layout.shape.overflow {
+		panic(weighted_parent_flow_error)
+	}
+	scratch.prepare_weights(layout.children.len)
+
+	mut budget := f64(get_size(layout.shape, axis))
+	budget -= f64(get_padding_size(layout.shape, axis))
+	budget -= f64(layout.spacing())
+	for i, child in layout.children {
+		if !is_weighted_flow_child(child) {
+			continue
+		}
+		if child.shape.main_axis_weight > 0 && get_sizing(child.shape, axis) == .fixed {
+			panic(weighted_fixed_error)
+		}
+		weight := if child.shape.main_axis_weight > 0 {
+			f64(child.shape.main_axis_weight)
+		} else if get_sizing(child.shape, axis) == .fill {
+			f64(1)
+		} else {
+			f64(0)
+		}
+		if weight > 0 {
+			scratch.candidates << i
+			scratch.weights << weight
+		} else {
+			budget -= f64(get_size(child.shape, axis))
+		}
+	}
+	if scratch.candidates.len == 0 {
+		return
+	}
+
+	mut minimum_total := f64(0)
+	for candidate in scratch.candidates {
+		minimum_total += f64(get_min_size(layout.children[candidate].shape, axis))
+	}
+	if budget < minimum_total {
+		for candidate in scratch.candidates {
+			mut child := &layout.children[candidate]
+			set_size(mut child.shape, axis, get_min_size(child.shape, axis))
+		}
+		return
+	}
+
+	mut remaining_budget := budget
+	mut remaining_weight := f64(0)
+	for weight in scratch.weights {
+		remaining_weight += weight
+	}
+	for i in 0 .. scratch.candidates.len {
+		scratch.fixed_indices << i
+	}
+	for scratch.fixed_indices.len > 0 && remaining_weight > 0 {
+		lambda := remaining_budget / remaining_weight
+		mut violation_total := f64(0)
+		for active_pos in scratch.fixed_indices {
+			child_idx := scratch.candidates[active_pos]
+			child := layout.children[child_idx]
+			target := lambda * scratch.weights[active_pos]
+			min_size := f64(get_min_size(child.shape, axis))
+			max_size := f64(get_max_size(child.shape, axis))
+			if target < min_size {
+				violation_total += min_size - target
+			} else if max_size > 0 && target > max_size {
+				violation_total += max_size - target
+			}
+		}
+
+		tolerance := f64(f32_tolerance)
+		if violation_total >= -tolerance && violation_total <= tolerance {
+			mut next_active := 0
+			for active_pos in scratch.fixed_indices {
+				child_idx := scratch.candidates[active_pos]
+				mut child := &layout.children[child_idx]
+				mut target := lambda * scratch.weights[active_pos]
+				min_size := f64(get_min_size(child.shape, axis))
+				max_size := f64(get_max_size(child.shape, axis))
+				mut clamped := false
+				if target < min_size {
+					target = min_size
+					clamped = true
+				} else if max_size > 0 && target > max_size {
+					target = max_size
+					clamped = true
+				}
+				set_size(mut child.shape, axis, f32(target))
+				if !clamped {
+					scratch.fixed_indices[next_active] = active_pos
+					next_active++
+				}
+			}
+			scratch.fixed_indices.trim(next_active)
+			break
+		}
+
+		freeze_minimums := violation_total > tolerance
+		mut next_active := 0
+		for active_pos in scratch.fixed_indices {
+			child_idx := scratch.candidates[active_pos]
+			mut child := &layout.children[child_idx]
+			weight := scratch.weights[active_pos]
+			min_size := f64(get_min_size(child.shape, axis))
+			max_size := f64(get_max_size(child.shape, axis))
+			target := lambda * weight
+			if freeze_minimums && target < min_size {
+				set_size(mut child.shape, axis, f32(min_size))
+				remaining_budget -= min_size
+			} else if !freeze_minimums && max_size > 0 && target > max_size {
+				set_size(mut child.shape, axis, f32(max_size))
+				remaining_budget -= max_size
+			} else {
+				scratch.fixed_indices[next_active] = active_pos
+				next_active++
+			}
+		}
+		scratch.fixed_indices.trim(next_active)
+		remaining_weight = f64(0)
+		for active_pos in scratch.fixed_indices {
+			remaining_weight += scratch.weights[active_pos]
+		}
+	}
+
+	// Restore f32 conversion residue on the last declarative candidate with room.
+	mut assigned := f64(0)
+	for candidate in scratch.candidates {
+		assigned += f64(get_size(layout.children[candidate].shape, axis))
+	}
+	mut residue := budget - assigned
+	if residue != 0 {
+		for reverse_i in 0 .. scratch.fixed_indices.len {
+			i := scratch.fixed_indices.len - 1 - reverse_i
+			active_pos := scratch.fixed_indices[i]
+			child_idx := scratch.candidates[active_pos]
+			mut child := &layout.children[child_idx]
+			current := f64(get_size(child.shape, axis))
+			min_size := f64(get_min_size(child.shape, axis))
+			max_size := f64(get_max_size(child.shape, axis))
+			mut target := current + residue
+			if target < min_size {
+				target = min_size
+			}
+			if max_size > 0 && target > max_size {
+				target = max_size
+			}
+			set_size(mut child.shape, axis, f32(target))
+			residue -= f64(get_size(child.shape, axis)) - current
+			if residue == 0 {
+				break
+			}
+		}
+	}
+}
+
 // layout_widths arranges children horizontally. Only containers with an axis
 // are processed.
 fn layout_widths(mut layout Layout) {
@@ -454,29 +648,38 @@ fn layout_fill_widths(mut layout Layout) {
 fn layout_fill_widths_with_scratch(mut layout Layout, mut scratch DistributeScratch) {
 	if layout.parent == unsafe { nil } {
 		scratch.parent_total_child_widths.clear()
+		validate_weighted_root(layout)
 	}
 	mut remaining_width := layout.shape.width - layout.shape.padding_width()
 
 	scratch.ensure_cap(layout.children.len)
 
 	if layout.shape.axis == .left_to_right {
+		mut has_explicit_weight := false
 		for mut child in layout.children {
 			remaining_width -= child.shape.width
+			if child.shape.main_axis_weight > 0 {
+				has_explicit_weight = true
+			}
 		}
 		// fence post spacing
 		remaining_width -= layout.spacing()
 
-		// Grow if needed
-		if remaining_width > f32_tolerance {
-			remaining_width = distribute_space(mut layout, remaining_width, .grow, .horizontal, mut
-				scratch.candidates, mut scratch.fixed_indices)
-		}
+		if has_explicit_weight {
+			distribute_weighted_space(mut layout, .horizontal, mut scratch)
+		} else {
+			// Grow if needed
+			if remaining_width > f32_tolerance {
+				remaining_width = distribute_space(mut layout, remaining_width, .grow, .horizontal, mut
+					scratch.candidates, mut scratch.fixed_indices)
+			}
 
-		// Shrink if needed — skip for wrap/overflow containers;
-		// layout_wrap/layout_overflow handle excess children.
-		if remaining_width < -f32_tolerance && !layout.shape.wrap && !layout.shape.overflow {
-			remaining_width = distribute_space(mut layout, remaining_width, .shrink, .horizontal, mut
-				scratch.candidates, mut scratch.fixed_indices)
+			// Shrink if needed — skip for wrap/overflow containers;
+			// layout_wrap/layout_overflow handle excess children.
+			if remaining_width < -f32_tolerance && !layout.shape.wrap && !layout.shape.overflow {
+				remaining_width = distribute_space(mut layout, remaining_width, .shrink,
+					.horizontal, mut scratch.candidates, mut scratch.fixed_indices)
+			}
 		}
 	} else if layout.shape.axis == .top_to_bottom {
 		if layout.shape.id_scroll > 0 && layout.shape.sizing.width == .fill
@@ -516,6 +719,10 @@ fn layout_fill_widths_with_scratch(mut layout Layout, mut scratch DistributeScra
 	}
 
 	for mut child in layout.children {
+		if child.shape.main_axis_weight > 0 && layout.shape.axis != .left_to_right
+			&& layout.shape.axis != .top_to_bottom {
+			panic(weighted_parent_axis_error)
+		}
 		layout_fill_widths_with_scratch(mut child, mut scratch)
 	}
 }
@@ -530,28 +737,37 @@ fn layout_fill_heights(mut layout Layout) {
 fn layout_fill_heights_with_scratch(mut layout Layout, mut scratch DistributeScratch) {
 	if layout.parent == unsafe { nil } {
 		scratch.parent_total_child_heights.clear()
+		validate_weighted_root(layout)
 	}
 	mut remaining_height := layout.shape.height - layout.shape.padding_height()
 
 	scratch.ensure_cap(layout.children.len)
 
 	if layout.shape.axis == .top_to_bottom {
+		mut has_explicit_weight := false
 		for mut child in layout.children {
 			remaining_height -= child.shape.height
+			if child.shape.main_axis_weight > 0 {
+				has_explicit_weight = true
+			}
 		}
 		// fence post spacing
 		remaining_height -= layout.spacing()
 
-		// Grow if needed
-		if remaining_height > f32_tolerance {
-			remaining_height = distribute_space(mut layout, remaining_height, .grow, .vertical, mut
-				scratch.candidates, mut scratch.fixed_indices)
-		}
+		if has_explicit_weight {
+			distribute_weighted_space(mut layout, .vertical, mut scratch)
+		} else {
+			// Grow if needed
+			if remaining_height > f32_tolerance {
+				remaining_height = distribute_space(mut layout, remaining_height, .grow, .vertical, mut
+					scratch.candidates, mut scratch.fixed_indices)
+			}
 
-		// Shrink if needed
-		if remaining_height < -f32_tolerance {
-			remaining_height = distribute_space(mut layout, remaining_height, .shrink, .vertical, mut
-				scratch.candidates, mut scratch.fixed_indices)
+			// Shrink if needed
+			if remaining_height < -f32_tolerance {
+				remaining_height = distribute_space(mut layout, remaining_height, .shrink,
+					.vertical, mut scratch.candidates, mut scratch.fixed_indices)
+			}
 		}
 	} else if layout.shape.axis == .left_to_right {
 		if layout.shape.id_scroll > 0 && layout.shape.sizing.height == .fill
@@ -591,6 +807,10 @@ fn layout_fill_heights_with_scratch(mut layout Layout, mut scratch DistributeScr
 	}
 
 	for mut child in layout.children {
+		if child.shape.main_axis_weight > 0 && layout.shape.axis != .left_to_right
+			&& layout.shape.axis != .top_to_bottom {
+			panic(weighted_parent_axis_error)
+		}
 		layout_fill_heights_with_scratch(mut child, mut scratch)
 	}
 }

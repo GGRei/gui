@@ -109,22 +109,29 @@ on each extracted floating layout independently.
 
 ### Pipeline Steps
 
-| #    | Function                       | Purpose                      |
-|------|--------------------------------|------------------------------|
-| 1    | `layout_widths`                | Intrinsic widths             |
-| 2    | `layout_fill_widths`           | Fill-distribute widths       |
-| 3    | `layout_wrap_text`             | Text wrapping                |
-| 4    | `layout_heights`               | Intrinsic heights            |
-| 5    | `layout_fill_heights`          | Fill-distribute heights      |
-| 6    | `layout_adjust_scroll_offsets` | Clamp scroll offsets         |
-| 7    | `layout_positions`             | X, Y positioning             |
-| 8    | `layout_disables`              | Propagate disabled state     |
-| 9    | `layout_scroll_containers`     | Tag text scroll parents      |
-| 10   | `layout_amend`                 | Post-layout callbacks        |
-| 11a  | `apply_layout_transition`      | Animate layout changes       |
-| 11b  | `apply_hero_transition`        | Animate hero elements        |
-| 12   | `layout_set_shape_clips`       | Compute clipping rectangles  |
-| 13   | `layout_hover`                 | Update hover states          |
+| #    | Function                       | Purpose                         |
+|------|--------------------------------|---------------------------------|
+| 1    | `layout_widths`                | Intrinsic widths                |
+| 2    | `layout_fill_widths`           | Fill/weighted width distribution|
+| 3    | `layout_wrap_containers`       | Wrap container line breaking    |
+| 4    | `layout_overflow`              | Overflow item visibility        |
+| 5    | `layout_wrap_text`             | Text wrapping                   |
+| 6    | `layout_heights`               | Intrinsic heights               |
+| 7    | `layout_fill_heights`          | Fill/weighted height distribution|
+| 8    | `layout_adjust_scroll_offsets` | Clamp scroll offsets            |
+| 9    | `layout_positions`             | X, Y positioning                |
+| 10   | `layout_disables`              | Propagate disabled state        |
+| 11   | `layout_scroll_containers`     | Tag text scroll parents         |
+| 12   | `layout_amend`                 | Post-layout callbacks           |
+| 13a  | `apply_layout_transition`      | Animate layout changes          |
+| 13b  | `apply_hero_transition`        | Animate hero elements           |
+| 14   | `layout_set_shape_clips`       | Compute clipping rectangles     |
+
+`layout_hover` is not part of the numbered `layout_pipeline` steps. After
+`layout_pipeline` has completed for the main tree and every floating layer,
+`layout_arrange` calls `layout_hover` in reverse layer order. The topmost layer
+therefore receives hover first, and a floating layer under the pointer blocks
+hover processing for layers beneath it.
 
 ### Why Multiple Passes?
 
@@ -155,23 +162,35 @@ Walk the tree bottom-up. For each container:
   child plus padding.
 - Clamp to min/max constraints.
 
-**Step 2 — Fill-Distribute Widths** (`layout_fill_widths`).
+**Step 2 — Fill/Weighted Width Distribution** (`layout_fill_widths`).
 Walk top-down. For each container whose axis is `.left_to_right`:
 
-1. Compute remaining width = container width − padding − spacing
-   − sum of children widths.
-2. If remaining > 0, grow `.fill` children. If remaining < 0,
-   shrink them. (See "Fill Distribution" below.)
+1. If at least one child has an explicit weight, distribute final widths
+   proportionally among weighted children and implicit-weight `.fill`
+   children. (See "Weighted Main-Axis Distribution" below.)
+2. Otherwise, compute remaining width = container width − padding − spacing
+   − sum of children widths. Grow or shrink `.fill` children using the legacy
+   path. (See "Legacy Fill Distribution" below.)
 
 For `.top_to_bottom` containers: each `.fill` child gets the
 container's content width (minus padding), clamped to min/max.
 
-**Step 3 — Text Wrapping** (`layout_wrap_text`).
+**Step 3 — Wrap Containers** (`layout_wrap_containers`).
+Wrap-enabled rows are split into lines after their widths are known. A weighted
+group directly managed by a wrap container is rejected before distribution;
+a wrap container may still be weighted as a child of another parent.
+
+**Step 4 — Overflow Visibility** (`layout_overflow`).
+Overflow panels determine which items fit after width sizing. A weighted group
+directly managed by an overflow parent is rejected before distribution; the
+overflow container itself may be weighted by an outer compatible parent.
+
+**Step 5 — Text Wrapping** (`layout_wrap_text`).
 Walk the tree. For each text shape, wrap its content to fit the
 now-known width. Wrapping changes the shape's minimum height, which
 is why this runs between width and height passes.
 
-**Step 4 — Intrinsic Heights** (`layout_heights`).
+**Step 6 — Intrinsic Heights** (`layout_heights`).
 Same logic as Step 1 but on the vertical axis:
 
 - `.top_to_bottom` (along-axis): sum children heights + spacing +
@@ -180,15 +199,16 @@ Same logic as Step 1 but on the vertical axis:
 - Special case: a `.fill`-height scroll container gets a small
   minimum height so it can shrink freely.
 
-**Step 5 — Fill-Distribute Heights** (`layout_fill_heights`).
-Same logic as Step 2 but on the vertical axis.
+**Step 7 — Fill/Weighted Height Distribution** (`layout_fill_heights`).
+Same logic as Step 2 but on the vertical axis. Weighted distribution applies
+to `.top_to_bottom` parents; the cross axis continues to use existing sizing.
 
-**Step 6 — Adjust Scroll Offsets** (`layout_adjust_scroll_offsets`).
+**Step 8 — Adjust Scroll Offsets** (`layout_adjust_scroll_offsets`).
 For each scroll container, clamp scroll offsets so they stay within
 the valid range (0 to content overflow). This handles cases where
 a window resize makes the current offset invalid.
 
-**Step 7 — Positions** (`layout_positions`).
+**Step 9 — Positions** (`layout_positions`).
 Walk top-down. For each child:
 
 1. Start at parent position + padding.
@@ -203,45 +223,47 @@ Floating layouts get their starting position from
 `float_attach_layout`, which computes coordinates from the parent's
 anchor point and the float's tie-off point, plus any offset.
 
-**Step 8 — Disable Propagation** (`layout_disables`).
+**Step 10 — Disable Propagation** (`layout_disables`).
 Walk the tree. If a parent is disabled, mark all descendants
 disabled.
 
-**Step 9 — Scroll Container Tags** (`layout_scroll_containers`).
+**Step 11 — Scroll Container Tags** (`layout_scroll_containers`).
 Walk the tree. For each text shape, record the nearest ancestor
 scroll container's `id_scroll`. This allows text selection to
 auto-scroll the correct parent.
 
-**Step 10 — Layout Amendments** (`layout_amend`).
+**Step 12 — Layout Amendments** (`layout_amend`).
 Walk bottom-up. Call each shape's `amend_layout` callback if set.
 These callbacks can adjust appearance after final positions are
 known (e.g., showing hover highlights). They should not change
 sizes.
 
-**Step 11a — Layout Transitions** (`apply_layout_transition`).
+**Step 13a — Layout Transitions** (`apply_layout_transition`).
 If a layout transition animation is active, interpolate each
 shape's position/size between its previous and current values.
 
-**Step 11b — Hero Transitions** (`apply_hero_transition`).
+**Step 13b — Hero Transitions** (`apply_hero_transition`).
 If a hero transition animation is active, interpolate matching
 hero-tagged shapes between their old and new positions.
 
-**Step 12 — Clipping Rectangles** (`layout_set_shape_clips`).
+**Step 14 — Clipping Rectangles** (`layout_set_shape_clips`).
 Walk top-down. Each shape's clip rectangle is the intersection of
 its own bounds with its parent's clip. This produces the visible
 region used for hit testing and draw culling.
 
-**Step 13 — Hover States** (`layout_hover`).
-Walk children first (front-to-back priority). For each shape with
-an `on_hover` handler: if the mouse is inside the shape's clip
-rectangle, call the handler. Stop after the first shape handles
-the event.
+**Post-pipeline hover phase** (`layout_hover`).
+As part of `layout_arrange`, walk layers from topmost to bottommost and children
+first within each layer. For each shape with an `on_hover` handler, call the
+handler when the mouse is inside its clip rectangle. Stop within a tree after
+the first shape handles the event, and do not visit lower layers when a floating
+layout contains the pointer.
 
-### Fill Distribution Strategy
+### Legacy Fill Distribution Strategy
 
 The `distribute_space` function handles both growing and shrinking
 of `.fill`-sized children. The approach equalizes children
-incrementally:
+incrementally. This path is unchanged and is used when the parent has no
+explicitly weighted child:
 
 **Growing** (remaining space > 0):
 
@@ -264,6 +286,59 @@ incrementally:
 
 This strategy prevents any single child from becoming much larger
 or smaller than its siblings, producing visually balanced layouts.
+
+### Weighted Main-Axis Distribution
+
+`gui.weighted(weight:, view:)` transparently annotates the root `Shape`
+generated by a child view. It does not add a `Layout` node. During view
+generation, the wrapper delegates root generation to the decorated view,
+transfers that view's possibly updated `content`, zeros its temporary interface
+slot with `array_clear`, and lets the outer generic traversal generate those
+children exactly once. Existing children already injected into the delegated
+root are preserved.
+
+A parent enters the weighted path only when at least one direct child has an
+explicit main-axis weight. Candidates are explicitly weighted `.fit` or `.fill`
+children plus undecorated `.fill` children with an implicit weight of `1`.
+Undecorated `.fit` and `.fixed` children are non-participants whose constrained
+sizes are reserved in the budget.
+
+For each candidate, the final main-axis size is:
+
+```text
+size_i = clamp(lambda * weight_i, min_i, max_i)
+```
+
+A maximum of zero means unbounded. The solver computes the parent content
+budget after padding, spacing, and non-participant sizes, then repeatedly:
+
+1. computes `lambda` from the remaining budget and active weight sum;
+2. sums the signed violations `clamp(target_i) - target_i`;
+3. freezes minimum violators when that sum is positive, or maximum violators
+   when it is negative; a near-zero sum means the clamped targets already
+   preserve the budget within tolerance;
+4. removes frozen candidates, recomputes the active weight sum, and repeats
+   until stable.
+
+If the minima exceed the budget, candidates retain their minima and overflow
+geometrically; clipping or scrolling is never enabled implicitly. If every
+maximum is reached, unused space is left to parent alignment. Calculations use
+`f64` and final dimensions use `f32`. Conversion residue is corrected in reverse
+declaration order among candidates that remain active and unclamped; candidates
+frozen at a minimum or maximum are never moved. If the residue is smaller than
+the ULP of every active candidate, it remains as representation error rather
+than breaking a bound or a clamped solution. RTL changes positions, not that
+order or the resulting sizes. Candidate and constraint buffers live in
+`DistributeScratch`, so distribution allocates no per-frame memory after scratch
+growth.
+
+Validation occurs before distribution. An explicit weight must be positive and
+finite and cannot be applied twice. A weighted root, a weighted child under an
+`.none`-axis parent, and a weighted group directly under wrap or overflow are
+invalid. A decorated root cannot be floating, `.none`, or `over_draw`, and a
+participant cannot be `.fixed` on the parent's main axis. These cases panic
+instead of ignoring the weight. In the absence of explicit weights, all legacy
+sizing behavior and ordering remain unchanged.
 
 ## Floating Layouts
 
@@ -293,14 +368,14 @@ value. Scroll state is stored in the window's `ViewState`:
 - `scroll_x[id_scroll]` — horizontal offset
 - `scroll_y[id_scroll]` — vertical offset
 
-The scroll offset shifts child positions (Step 7) but does not
-change the container's own size. Step 6 clamps offsets to prevent
+The scroll offset shifts child positions (Step 9) but does not
+change the container's own size. Step 8 clamps offsets to prevent
 scrolling past content bounds. Scroll containers automatically
 enable clipping so children outside the viewport are not drawn.
 
 ## Layout Amendments
 
-The `amend_layout` callback on a shape runs in Step 10, after all
+The `amend_layout` callback on a shape runs in Step 12, after all
 positions and sizes are final. It receives the layout and window,
 and can modify appearance properties (color, visibility,
 decorations). It should not change sizes, as the size passes have
@@ -315,6 +390,7 @@ tooltip placement adjustments.
   parent/float extraction
 - `layout_sizing.v` — `layout_widths`, `layout_heights`,
   `layout_fill_widths`, `layout_fill_heights`, `distribute_space`
+- `view_weighted.v` — transparent child weighting decorator
 - `layout_position.v` — `layout_positions`, `layout_disables`,
   `layout_scroll_containers`, `layout_amend`, `layout_hover`,
   `layout_set_shape_clips`, `layout_wrap_text`,
