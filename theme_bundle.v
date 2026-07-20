@@ -1,6 +1,6 @@
 module gui
 
-import json
+import json2
 import os
 import strings
 
@@ -89,7 +89,7 @@ pub fn theme_parse(content string) !Theme {
 	if trimmed.len == 0 || !trimmed.starts_with('{') || !trimmed.ends_with('}') {
 		return error('invalid JSON: expected object')
 	}
-	bundle := json.decode(ThemeBundle, trimmed) or { return error('invalid JSON: ${err}') }
+	bundle := json2.decode[ThemeBundle](trimmed) or { return error('invalid JSON: ${err}') }
 	cfg := bundle.to_theme_cfg()
 	return theme_maker(cfg)
 }

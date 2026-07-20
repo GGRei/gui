@@ -25,7 +25,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  V_VERSION: 0.5.1
   VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
   VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
 
@@ -36,115 +35,202 @@ jobs:
     timeout-minutes: 45
     if: ${{ inputs.prewarm_deps_only }}
     steps:
-      - name: Install V
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $asset = 'v_windows.zip'
-          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
-          Invoke-WebRequest -Uri $url -OutFile $asset
-          Expand-Archive -Path $asset -DestinationPath . -Force
-          $vPath = (Resolve-Path .\v).Path
-          Add-Content -Path $env:GITHUB_PATH -Value $vPath
-      - name: Verify V version
-        shell: pwsh
-        run: |
-          $vVersion = v version
-          Write-Host $vVersion
-          if ($vVersion -notlike "*$env:V_VERSION*") {
-            throw "Expected V version $env:V_VERSION"
-          }
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VCPKG_BINARY_CACHE }}
-          key: windows-vcpkg-x64-windows-pango-freetype-${{ env.V_VERSION }}-v1
-          restore-keys: |
-            windows-vcpkg-x64-windows-pango-freetype-
-      - name: Restore V module cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.vmodules/vglyph
-          key: windows-vmodules-vglyph-${{ env.V_VERSION }}-v1
-          restore-keys: |
-            windows-vmodules-vglyph-
-      - name: Install pango and freetype
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
-          vcpkg install pango freetype
-      - name: Expose vcpkg pkg-config paths
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $triplet = 'x64-windows'
-          $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
-          $roots = @()
-          if ($vcpkgExe) {
-            $roots += Split-Path -Parent $vcpkgExe
-          }
-          if ($env:VCPKG_ROOT) {
-            $roots += $env:VCPKG_ROOT
-          }
-          $vcpkgRoot = $null
-          foreach ($root in ($roots | Select-Object -Unique)) {
-            if (Test-Path (Join-Path $root "installed\$triplet")) {
-              $vcpkgRoot = $root
-              break
-            }
-          }
-          if (-not $vcpkgRoot) {
-            throw "Could not find vcpkg installed\$triplet from vcpkg.exe or VCPKG_ROOT"
-          }
-          $tripletRoot = Join-Path $vcpkgRoot "installed\$triplet"
-          $pkgConfigDirs = @(
-            (Join-Path $tripletRoot 'lib\pkgconfig'),
-            (Join-Path $tripletRoot 'share\pkgconfig')
-          ) | Where-Object { Test-Path $_ }
-          if ($pkgConfigDirs.Count -eq 0) {
-            throw "No pkgconfig directories found under $tripletRoot"
-          }
-          $pkgConfigPath = $pkgConfigDirs -join ';'
-          "PKG_CONFIG_PATH=$pkgConfigPath" | Add-Content -Path $env:GITHUB_ENV
-          $env:PKG_CONFIG_PATH = $pkgConfigPath
-
-          $pathEntries = @()
-          $binDir = Join-Path $tripletRoot 'bin'
-          if (Test-Path $binDir) {
-            $pathEntries += $binDir
-          }
-          $pkgconfDir = Join-Path $tripletRoot 'tools\pkgconf'
-          if (Test-Path $pkgconfDir) {
-            $pathEntries += $pkgconfDir
-          }
-          foreach ($entry in $pathEntries) {
-            $entry | Add-Content -Path $env:GITHUB_PATH
-          }
-          if ($pathEntries.Count -gt 0) {
-            $env:PATH = ($pathEntries + $env:PATH) -join ';'
-          }
-
-          if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) {
-            $pkgconf = Get-Command pkgconf -ErrorAction SilentlyContinue
-            if ($pkgconf) {
-              $shimDir = Join-Path $env:RUNNER_TEMP 'pkg-config-shim'
-              New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
-              Set-Content -Path (Join-Path $shimDir 'pkg-config.cmd') -Encoding ascii -Value @(
-                '@echo off',
-                '"' + $pkgconf.Source + '" %*'
-              )
-              $shimDir | Add-Content -Path $env:GITHUB_PATH
-              $env:PATH = "$shimDir;$env:PATH"
-            }
-          }
-
-          $pkgConfig = Get-Command pkg-config -ErrorAction Stop
-          & $pkgConfig.Source --exists freetype2 pango pangoft2
+    - name: Resolve V revision
+      id: v
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Restore V compiler cache
+      id: restore-v-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: v
+        key: windows-v-compiler-${{ steps.v.outputs.revision }}-v1
+    - name: Install V
+      id: install-v
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Assert-NativeCommand($Message) {
           if ($LASTEXITCODE -ne 0) {
-            throw "pkg-config could not resolve freetype2 pango pangoft2"
+            throw $Message
           }
-      - name: Install vglyph
-        run: v install vglyph
+        }
+        $expectedRevision = '${{ steps.v.outputs.revision }}'
+        if (Test-Path .\v\v.exe) {
+          $cachedRevision = ( & git -C v rev-parse HEAD).Trim()
+          Assert-NativeCommand "Could not inspect cached V revision"
+          if ($cachedRevision -ne $expectedRevision) {
+            Write-Host "Cached V revision $cachedRevision does not match expected $expectedRevision; rebuilding."
+            Remove-Item -Recurse -Force .\v
+          }
+        }
+        if (-not (Test-Path .\v\v.exe)) {
+          if (Test-Path .\v) {
+            Remove-Item -Recurse -Force .\v
+          }
+          git init v
+          Assert-NativeCommand "git init failed"
+          git -C v remote add origin https://github.com/vlang/v
+          Assert-NativeCommand "git remote add failed"
+          git -C v fetch --depth 1 origin $expectedRevision
+          Assert-NativeCommand "git fetch failed"
+          git -C v checkout --detach FETCH_HEAD
+          Assert-NativeCommand "git checkout failed"
+          Push-Location v
+          cmd /c makev.bat
+          if ($LASTEXITCODE -ne 0) {
+            throw "makev.bat failed"
+          }
+          Pop-Location
+        }
+        $vPath = (Resolve-Path .\v).Path
+        Add-Content -Path $env:GITHUB_PATH -Value $vPath
+        $version = ( & .\v\v.exe version).Trim()
+        $revision = ( & git -C v rev-parse HEAD).Trim()
+        Assert-NativeCommand "Could not inspect V revision"
+        "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Log V version
+      run: v version
+    - name: Save V compiler cache
+      if: ${{ steps.restore-v-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: v
+        key: ${{ steps.restore-v-cache.outputs.cache-primary-key }}
+    - name: Resolve vglyph revision
+      id: vglyph
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
+        if ($LASTEXITCODE -ne 0) {
+          throw "Could not resolve vglyph revision"
+        }
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Restore vcpkg binary cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        restore-keys: |
+          windows-vcpkg-x64-windows-pango-freetype-
+    - name: Restore V module cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.vmodules/vglyph
+        key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
+        restore-keys: |
+          windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
+          windows-vmodules-vglyph-
+    - name: Install pango and freetype
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
+        vcpkg install pango freetype
+    - name: Expose vcpkg pkg-config paths
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $triplet = 'x64-windows'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $roots = @()
+        if ($vcpkgExe) {
+          $roots += Split-Path -Parent $vcpkgExe
+        }
+        if ($env:VCPKG_ROOT) {
+          $roots += $env:VCPKG_ROOT
+        }
+        $vcpkgRoot = $null
+        foreach ($root in ($roots | Select-Object -Unique)) {
+          if (Test-Path (Join-Path $root "installed\$triplet")) {
+            $vcpkgRoot = $root
+            break
+          }
+        }
+        if (-not $vcpkgRoot) {
+          throw "Could not find vcpkg installed\$triplet from vcpkg.exe or VCPKG_ROOT"
+        }
+        $tripletRoot = Join-Path $vcpkgRoot "installed\$triplet"
+        $pkgConfigDirs = @(
+          (Join-Path $tripletRoot 'lib\pkgconfig'),
+          (Join-Path $tripletRoot 'share\pkgconfig')
+        ) | Where-Object { Test-Path $_ }
+        if ($pkgConfigDirs.Count -eq 0) {
+          throw "No pkgconfig directories found under $tripletRoot"
+        }
+        $pkgConfigPath = $pkgConfigDirs -join ';'
+        "PKG_CONFIG_PATH=$pkgConfigPath" | Add-Content -Path $env:GITHUB_ENV
+        $env:PKG_CONFIG_PATH = $pkgConfigPath
+        $pathEntries = @()
+        $binDir = Join-Path $tripletRoot 'bin'
+        if (Test-Path $binDir) {
+          $pathEntries += $binDir
+        }
+        $pkgconfDir = Join-Path $tripletRoot 'tools\pkgconf'
+        if (Test-Path $pkgconfDir) {
+          $pathEntries += $pkgconfDir
+        }
+        foreach ($entry in $pathEntries) {
+          $entry | Add-Content -Path $env:GITHUB_PATH
+        }
+        if ($pathEntries.Count -gt 0) {
+          $env:PATH = ($pathEntries + $env:PATH) -join ';'
+        }
+        if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) {
+          $pkgconf = Get-Command pkgconf -ErrorAction SilentlyContinue
+          if ($pkgconf) {
+            $shimDir = Join-Path $env:RUNNER_TEMP 'pkg-config-shim'
+            New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+            Set-Content -Path (Join-Path $shimDir 'pkg-config.cmd') -Encoding ascii -Value @(
+              '@echo off',
+              '"' + $pkgconf.Source + '" %*'
+            )
+            $shimDir | Add-Content -Path $env:GITHUB_PATH
+            $env:PATH = "$shimDir;$env:PATH"
+          }
+        }
+        $pkgConfig = Get-Command pkg-config -ErrorAction Stop
+        & $pkgConfig.Source --exists freetype2 pango pangoft2
+        if ($LASTEXITCODE -ne 0) {
+          throw "pkg-config could not resolve freetype2 pango pangoft2"
+        }
+    - name: Ensure vglyph revision
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Assert-NativeCommand($Message) {
+          if ($LASTEXITCODE -ne 0) {
+            throw $Message
+          }
+        }
+        $expectedRevision = '${{ steps.vglyph.outputs.revision }}'
+        $vglyphPath = Join-Path $HOME '.vmodules\vglyph'
+        if (Test-Path (Join-Path $vglyphPath '.git')) {
+          $cachedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
+          Assert-NativeCommand "Could not inspect cached vglyph revision"
+          if ($cachedRevision -ne $expectedRevision) {
+            Write-Host "Cached vglyph revision $cachedRevision does not match expected $expectedRevision; rebuilding."
+            Remove-Item -Recurse -Force $vglyphPath
+          }
+        } elseif (Test-Path $vglyphPath) {
+          Remove-Item -Recurse -Force $vglyphPath
+        }
+        if (-not (Test-Path $vglyphPath)) {
+          $vmodulesPath = Split-Path -Parent $vglyphPath
+          New-Item -ItemType Directory -Force -Path $vmodulesPath | Out-Null
+          git init $vglyphPath
+          Assert-NativeCommand "git init vglyph failed"
+          git -C $vglyphPath remote add origin https://github.com/vlang/vglyph
+          Assert-NativeCommand "git remote add vglyph failed"
+          git -C $vglyphPath fetch --depth 1 origin $expectedRevision
+          Assert-NativeCommand "git fetch vglyph failed"
+          git -C $vglyphPath checkout --detach FETCH_HEAD
+          Assert-NativeCommand "git checkout vglyph failed"
+        }
 
   msvc:
     name: MSVC native smoke
@@ -152,161 +238,248 @@ jobs:
     timeout-minutes: 25
     if: ${{ !inputs.prewarm_deps_only }}
     steps:
-      - name: Install V
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $asset = 'v_windows.zip'
-          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
-          Invoke-WebRequest -Uri $url -OutFile $asset
-          Expand-Archive -Path $asset -DestinationPath . -Force
-          $vPath = (Resolve-Path .\v).Path
-          Add-Content -Path $env:GITHUB_PATH -Value $vPath
-      - name: Verify V version
-        shell: pwsh
-        run: |
-          $vVersion = v version
-          Write-Host $vVersion
-          if ($vVersion -notlike "*$env:V_VERSION*") {
-            throw "Expected V version $env:V_VERSION"
-          }
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VCPKG_BINARY_CACHE }}
-          key: windows-vcpkg-x64-windows-pango-freetype-${{ env.V_VERSION }}-v1
-          restore-keys: |
-            windows-vcpkg-x64-windows-pango-freetype-
-      - name: Restore V module cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.vmodules/vglyph
-          key: windows-vmodules-vglyph-${{ env.V_VERSION }}-v1
-          restore-keys: |
-            windows-vmodules-vglyph-
-      - name: Install pango and freetype
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
-          vcpkg install pango freetype
-      - name: Expose vcpkg pkg-config paths
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $triplet = 'x64-windows'
-          $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
-          $roots = @()
-          if ($vcpkgExe) {
-            $roots += Split-Path -Parent $vcpkgExe
-          }
-          if ($env:VCPKG_ROOT) {
-            $roots += $env:VCPKG_ROOT
-          }
-          $vcpkgRoot = $null
-          foreach ($root in ($roots | Select-Object -Unique)) {
-            if (Test-Path (Join-Path $root "installed\$triplet")) {
-              $vcpkgRoot = $root
-              break
-            }
-          }
-          if (-not $vcpkgRoot) {
-            throw "Could not find vcpkg installed\$triplet from vcpkg.exe or VCPKG_ROOT"
-          }
-          $tripletRoot = Join-Path $vcpkgRoot "installed\$triplet"
-          $pkgConfigDirs = @(
-            (Join-Path $tripletRoot 'lib\pkgconfig'),
-            (Join-Path $tripletRoot 'share\pkgconfig')
-          ) | Where-Object { Test-Path $_ }
-          if ($pkgConfigDirs.Count -eq 0) {
-            throw "No pkgconfig directories found under $tripletRoot"
-          }
-          $pkgConfigPath = $pkgConfigDirs -join ';'
-          "PKG_CONFIG_PATH=$pkgConfigPath" | Add-Content -Path $env:GITHUB_ENV
-          $env:PKG_CONFIG_PATH = $pkgConfigPath
-
-          $pathEntries = @()
-          $binDir = Join-Path $tripletRoot 'bin'
-          if (Test-Path $binDir) {
-            $pathEntries += $binDir
-          }
-          $pkgconfDir = Join-Path $tripletRoot 'tools\pkgconf'
-          if (Test-Path $pkgconfDir) {
-            $pathEntries += $pkgconfDir
-          }
-          foreach ($entry in $pathEntries) {
-            $entry | Add-Content -Path $env:GITHUB_PATH
-          }
-          if ($pathEntries.Count -gt 0) {
-            $env:PATH = ($pathEntries + $env:PATH) -join ';'
-          }
-
-          if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) {
-            $pkgconf = Get-Command pkgconf -ErrorAction SilentlyContinue
-            if ($pkgconf) {
-              $shimDir = Join-Path $env:RUNNER_TEMP 'pkg-config-shim'
-              New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
-              Set-Content -Path (Join-Path $shimDir 'pkg-config.cmd') -Encoding ascii -Value @(
-                '@echo off',
-                '"' + $pkgconf.Source + '" %*'
-              )
-              $shimDir | Add-Content -Path $env:GITHUB_PATH
-              $env:PATH = "$shimDir;$env:PATH"
-            }
-          }
-
-          $pkgConfig = Get-Command pkg-config -ErrorAction Stop
-          & $pkgConfig.Source --exists freetype2 pango pangoft2
+    - name: Resolve V revision
+      id: v
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Restore V compiler cache
+      id: restore-v-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: v
+        key: windows-v-compiler-${{ steps.v.outputs.revision }}-v1
+    - name: Install V
+      id: install-v
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Assert-NativeCommand($Message) {
           if ($LASTEXITCODE -ne 0) {
-            throw "pkg-config could not resolve freetype2 pango pangoft2"
+            throw $Message
           }
-      - name: Install vglyph
-        run: v install vglyph
-      - name: Checkout gui
-        uses: actions/checkout@v4
-        with:
-          path: gui
-      - name: Configure MSVC developer environment
-        uses: ilammy/msvc-dev-cmd@v1
-      - name: Run Windows setup preflight
-        env:
-          GUI_WINDOWS_PREFLIGHT_CC: msvc
-        run: v run gui/_windows_preflight.vsh
-      - name: Run noninteractive native tests
-        run: >
-          v -no-parallel -cc msvc test
-          gui/_native_dialog_test.v
-          gui/_native_print_test.v
-          gui/_native_notification_test.v
-          gui/nativebridge/_bridge_ex_test.v
-          gui/nativebridge/_readback_abi_test.v
-      - name: Compile native smoke examples
-        run: |
-          v -no-parallel -cc msvc -W -o dialogs_smoke.exe gui/examples/dialogs.v
-          v -no-parallel -cc msvc -W -o printing_smoke.exe gui/examples/printing.v
-          v -no-parallel -cc msvc -W -o notification_smoke.exe gui/examples/native_notification.v
-          if ('${{ inputs.run_d3d11 }}' -eq 'true') {
-            $d3dExamples = @(
-              @{ Name = 'printing'; Path = 'gui/examples/printing.v'; Warn = $true },
-              @{ Name = 'gradient_demo'; Path = 'gui/examples/gradient_demo.v'; Warn = $true },
-              @{ Name = 'shadow_demo'; Path = 'gui/examples/shadow_demo.v'; Warn = $true },
-              @{ Name = 'blur_demo'; Path = 'gui/examples/blur_demo.v'; Warn = $true },
-              @{ Name = 'image_clip'; Path = 'gui/examples/image_clip.v'; Warn = $true },
-              @{ Name = 'svg_demo'; Path = 'gui/examples/svg_demo.v'; Warn = $true },
-              @{ Name = 'custom_shader'; Path = 'gui/examples/custom_shader.v'; Warn = $true },
-              @{ Name = 'showcase'; Path = 'gui/examples/showcase.v'; Warn = $false }
+        }
+        $expectedRevision = '${{ steps.v.outputs.revision }}'
+        if (Test-Path .\v\v.exe) {
+          $cachedRevision = ( & git -C v rev-parse HEAD).Trim()
+          Assert-NativeCommand "Could not inspect cached V revision"
+          if ($cachedRevision -ne $expectedRevision) {
+            Write-Host "Cached V revision $cachedRevision does not match expected $expectedRevision; rebuilding."
+            Remove-Item -Recurse -Force .\v
+          }
+        }
+        if (-not (Test-Path .\v\v.exe)) {
+          if (Test-Path .\v) {
+            Remove-Item -Recurse -Force .\v
+          }
+          git init v
+          Assert-NativeCommand "git init failed"
+          git -C v remote add origin https://github.com/vlang/v
+          Assert-NativeCommand "git remote add failed"
+          git -C v fetch --depth 1 origin $expectedRevision
+          Assert-NativeCommand "git fetch failed"
+          git -C v checkout --detach FETCH_HEAD
+          Assert-NativeCommand "git checkout failed"
+          Push-Location v
+          cmd /c makev.bat
+          if ($LASTEXITCODE -ne 0) {
+            throw "makev.bat failed"
+          }
+          Pop-Location
+        }
+        $vPath = (Resolve-Path .\v).Path
+        Add-Content -Path $env:GITHUB_PATH -Value $vPath
+        $version = ( & .\v\v.exe version).Trim()
+        $revision = ( & git -C v rev-parse HEAD).Trim()
+        Assert-NativeCommand "Could not inspect V revision"
+        "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Log V version
+      run: v version
+    - name: Save V compiler cache
+      if: ${{ steps.restore-v-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: v
+        key: ${{ steps.restore-v-cache.outputs.cache-primary-key }}
+    - name: Resolve vglyph revision
+      id: vglyph
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
+        if ($LASTEXITCODE -ne 0) {
+          throw "Could not resolve vglyph revision"
+        }
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Restore vcpkg binary cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        restore-keys: |
+          windows-vcpkg-x64-windows-pango-freetype-
+    - name: Restore V module cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.vmodules/vglyph
+        key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
+        restore-keys: |
+          windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
+          windows-vmodules-vglyph-
+    - name: Install pango and freetype
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
+        vcpkg install pango freetype
+    - name: Expose vcpkg pkg-config paths
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $triplet = 'x64-windows'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $roots = @()
+        if ($vcpkgExe) {
+          $roots += Split-Path -Parent $vcpkgExe
+        }
+        if ($env:VCPKG_ROOT) {
+          $roots += $env:VCPKG_ROOT
+        }
+        $vcpkgRoot = $null
+        foreach ($root in ($roots | Select-Object -Unique)) {
+          if (Test-Path (Join-Path $root "installed\$triplet")) {
+            $vcpkgRoot = $root
+            break
+          }
+        }
+        if (-not $vcpkgRoot) {
+          throw "Could not find vcpkg installed\$triplet from vcpkg.exe or VCPKG_ROOT"
+        }
+        $tripletRoot = Join-Path $vcpkgRoot "installed\$triplet"
+        $pkgConfigDirs = @(
+          (Join-Path $tripletRoot 'lib\pkgconfig'),
+          (Join-Path $tripletRoot 'share\pkgconfig')
+        ) | Where-Object { Test-Path $_ }
+        if ($pkgConfigDirs.Count -eq 0) {
+          throw "No pkgconfig directories found under $tripletRoot"
+        }
+        $pkgConfigPath = $pkgConfigDirs -join ';'
+        "PKG_CONFIG_PATH=$pkgConfigPath" | Add-Content -Path $env:GITHUB_ENV
+        $env:PKG_CONFIG_PATH = $pkgConfigPath
+        $pathEntries = @()
+        $binDir = Join-Path $tripletRoot 'bin'
+        if (Test-Path $binDir) {
+          $pathEntries += $binDir
+        }
+        $pkgconfDir = Join-Path $tripletRoot 'tools\pkgconf'
+        if (Test-Path $pkgconfDir) {
+          $pathEntries += $pkgconfDir
+        }
+        foreach ($entry in $pathEntries) {
+          $entry | Add-Content -Path $env:GITHUB_PATH
+        }
+        if ($pathEntries.Count -gt 0) {
+          $env:PATH = ($pathEntries + $env:PATH) -join ';'
+        }
+        if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) {
+          $pkgconf = Get-Command pkgconf -ErrorAction SilentlyContinue
+          if ($pkgconf) {
+            $shimDir = Join-Path $env:RUNNER_TEMP 'pkg-config-shim'
+            New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+            Set-Content -Path (Join-Path $shimDir 'pkg-config.cmd') -Encoding ascii -Value @(
+              '@echo off',
+              '"' + $pkgconf.Source + '" %*'
             )
-            foreach ($example in $d3dExamples) {
-              $args = @('-no-parallel', '-cc', 'msvc', '-d', 'sokol_d3d11')
-              if ($example.Warn) {
-                $args += '-W'
-              }
-              $args += @('-o', "$($example.Name)_d3d11_smoke.exe", $example.Path)
-              v @args
-              if ($LASTEXITCODE -ne 0) {
-                exit $LASTEXITCODE
-              }
+            $shimDir | Add-Content -Path $env:GITHUB_PATH
+            $env:PATH = "$shimDir;$env:PATH"
+          }
+        }
+        $pkgConfig = Get-Command pkg-config -ErrorAction Stop
+        & $pkgConfig.Source --exists freetype2 pango pangoft2
+        if ($LASTEXITCODE -ne 0) {
+          throw "pkg-config could not resolve freetype2 pango pangoft2"
+        }
+    - name: Ensure vglyph revision
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Assert-NativeCommand($Message) {
+          if ($LASTEXITCODE -ne 0) {
+            throw $Message
+          }
+        }
+        $expectedRevision = '${{ steps.vglyph.outputs.revision }}'
+        $vglyphPath = Join-Path $HOME '.vmodules\vglyph'
+        if (Test-Path (Join-Path $vglyphPath '.git')) {
+          $cachedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
+          Assert-NativeCommand "Could not inspect cached vglyph revision"
+          if ($cachedRevision -ne $expectedRevision) {
+            Write-Host "Cached vglyph revision $cachedRevision does not match expected $expectedRevision; rebuilding."
+            Remove-Item -Recurse -Force $vglyphPath
+          }
+        } elseif (Test-Path $vglyphPath) {
+          Remove-Item -Recurse -Force $vglyphPath
+        }
+        if (-not (Test-Path $vglyphPath)) {
+          $vmodulesPath = Split-Path -Parent $vglyphPath
+          New-Item -ItemType Directory -Force -Path $vmodulesPath | Out-Null
+          git init $vglyphPath
+          Assert-NativeCommand "git init vglyph failed"
+          git -C $vglyphPath remote add origin https://github.com/vlang/vglyph
+          Assert-NativeCommand "git remote add vglyph failed"
+          git -C $vglyphPath fetch --depth 1 origin $expectedRevision
+          Assert-NativeCommand "git fetch vglyph failed"
+          git -C $vglyphPath checkout --detach FETCH_HEAD
+          Assert-NativeCommand "git checkout vglyph failed"
+        }
+    - name: Checkout gui
+      uses: actions/checkout@v4
+      with:
+        path: gui
+    - name: Configure MSVC developer environment
+      uses: ilammy/msvc-dev-cmd@v1
+    - name: Run Windows setup preflight
+      env:
+        GUI_WINDOWS_PREFLIGHT_CC: msvc
+      run: v run gui/_windows_preflight.vsh
+    - name: Run noninteractive native tests
+      run: >
+        v -no-parallel -cc msvc test
+        gui/_native_dialog_test.v
+        gui/_native_print_test.v
+        gui/_native_notification_test.v
+        gui/nativebridge/_bridge_ex_test.v
+        gui/nativebridge/_readback_abi_test.v
+    - name: Compile native smoke examples
+      run: |
+        v -no-parallel -cc msvc -W -o dialogs_smoke.exe gui/examples/dialogs.v
+        v -no-parallel -cc msvc -W -o printing_smoke.exe gui/examples/printing.v
+        v -no-parallel -cc msvc -W -o notification_smoke.exe gui/examples/native_notification.v
+        if ('${{ inputs.run_d3d11 }}' -eq 'true') {
+          $d3dExamples = @(
+            @{ Name = 'printing'; Path = 'gui/examples/printing.v'; Warn = $true },
+            @{ Name = 'gradient_demo'; Path = 'gui/examples/gradient_demo.v'; Warn = $true },
+            @{ Name = 'shadow_demo'; Path = 'gui/examples/shadow_demo.v'; Warn = $true },
+            @{ Name = 'blur_demo'; Path = 'gui/examples/blur_demo.v'; Warn = $true },
+            @{ Name = 'image_clip'; Path = 'gui/examples/image_clip.v'; Warn = $true },
+            @{ Name = 'svg_demo'; Path = 'gui/examples/svg_demo.v'; Warn = $true },
+            @{ Name = 'custom_shader'; Path = 'gui/examples/custom_shader.v'; Warn = $true },
+            @{ Name = 'showcase'; Path = 'gui/examples/showcase.v'; Warn = $false }
+          )
+          foreach ($example in $d3dExamples) {
+            $args = @('-no-parallel', '-cc', 'msvc', '-d', 'sokol_d3d11')
+            if ($example.Warn) {
+              $args += '-W'
+            }
+            $args += @('-o', "$($example.Name)_d3d11_smoke.exe", $example.Path)
+            v @args
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
             }
           }
+        }
 
   clang:
     name: Clang native smoke (exploratory)
@@ -315,89 +488,181 @@ jobs:
     continue-on-error: true
     if: ${{ !inputs.prewarm_deps_only && inputs.run_clang }}
     steps:
-      - name: Install V
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $asset = 'v_windows.zip'
-          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
-          Invoke-WebRequest -Uri $url -OutFile $asset
-          Expand-Archive -Path $asset -DestinationPath . -Force
-          $vPath = (Resolve-Path .\v).Path
-          Add-Content -Path $env:GITHUB_PATH -Value $vPath
-      - name: Verify V version
-        shell: pwsh
-        run: |
-          $vVersion = v version
-          Write-Host $vVersion
-          if ($vVersion -notlike "*$env:V_VERSION*") {
-            throw "Expected V version $env:V_VERSION"
+    - name: Resolve V revision
+      id: v
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Restore V compiler cache
+      id: restore-v-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: v
+        key: windows-v-compiler-${{ steps.v.outputs.revision }}-v1
+    - name: Install V
+      id: install-v
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Assert-NativeCommand($Message) {
+          if ($LASTEXITCODE -ne 0) {
+            throw $Message
           }
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ env.VCPKG_BINARY_CACHE }}
-          key: windows-vcpkg-x64-windows-pango-freetype-${{ env.V_VERSION }}-v1
-          restore-keys: |
-            windows-vcpkg-x64-windows-pango-freetype-
-      - name: Restore V module cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.vmodules/vglyph
-          key: windows-vmodules-vglyph-${{ env.V_VERSION }}-v1
-          restore-keys: |
-            windows-vmodules-vglyph-
-      - name: Install pango and freetype
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
-          vcpkg install pango freetype
-      - name: Install vglyph
-        run: v install vglyph
-      - name: Checkout gui
-        uses: actions/checkout@v4
-        with:
-          path: gui
-      - name: Run Windows setup preflight
-        env:
-          GUI_WINDOWS_PREFLIGHT_CC: clang
-        run: v run gui/_windows_preflight.vsh
-      - name: Run noninteractive native tests
-        run: >
-          v -no-parallel -cc clang test
-          gui/_native_dialog_test.v
-          gui/_native_print_test.v
-          gui/_native_notification_test.v
-          gui/nativebridge/_bridge_ex_test.v
-          gui/nativebridge/_readback_abi_test.v
-      - name: Compile native smoke examples
-        run: |
-          v -no-parallel -cc clang -W -o dialogs_smoke.exe gui/examples/dialogs.v
-          v -no-parallel -cc clang -W -o printing_smoke.exe gui/examples/printing.v
-          v -no-parallel -cc clang -W -o notification_smoke.exe gui/examples/native_notification.v
-          if ('${{ inputs.run_d3d11 }}' -eq 'true') {
-            $d3dExamples = @(
-              @{ Name = 'printing'; Path = 'gui/examples/printing.v'; Warn = $true },
-              @{ Name = 'gradient_demo'; Path = 'gui/examples/gradient_demo.v'; Warn = $true },
-              @{ Name = 'shadow_demo'; Path = 'gui/examples/shadow_demo.v'; Warn = $true },
-              @{ Name = 'blur_demo'; Path = 'gui/examples/blur_demo.v'; Warn = $true },
-              @{ Name = 'image_clip'; Path = 'gui/examples/image_clip.v'; Warn = $true },
-              @{ Name = 'svg_demo'; Path = 'gui/examples/svg_demo.v'; Warn = $true },
-              @{ Name = 'custom_shader'; Path = 'gui/examples/custom_shader.v'; Warn = $true },
-              @{ Name = 'showcase'; Path = 'gui/examples/showcase.v'; Warn = $false }
-            )
-            foreach ($example in $d3dExamples) {
-              $args = @('-no-parallel', '-cc', 'clang', '-d', 'sokol_d3d11')
-              if ($example.Warn) {
-                $args += '-W'
-              }
-              $args += @('-o', "$($example.Name)_d3d11_smoke.exe", $example.Path)
-              v @args
-              if ($LASTEXITCODE -ne 0) {
-                exit $LASTEXITCODE
-              }
+        }
+        $expectedRevision = '${{ steps.v.outputs.revision }}'
+        if (Test-Path .\v\v.exe) {
+          $cachedRevision = ( & git -C v rev-parse HEAD).Trim()
+          Assert-NativeCommand "Could not inspect cached V revision"
+          if ($cachedRevision -ne $expectedRevision) {
+            Write-Host "Cached V revision $cachedRevision does not match expected $expectedRevision; rebuilding."
+            Remove-Item -Recurse -Force .\v
+          }
+        }
+        if (-not (Test-Path .\v\v.exe)) {
+          if (Test-Path .\v) {
+            Remove-Item -Recurse -Force .\v
+          }
+          git init v
+          Assert-NativeCommand "git init failed"
+          git -C v remote add origin https://github.com/vlang/v
+          Assert-NativeCommand "git remote add failed"
+          git -C v fetch --depth 1 origin $expectedRevision
+          Assert-NativeCommand "git fetch failed"
+          git -C v checkout --detach FETCH_HEAD
+          Assert-NativeCommand "git checkout failed"
+          Push-Location v
+          cmd /c makev.bat
+          if ($LASTEXITCODE -ne 0) {
+            throw "makev.bat failed"
+          }
+          Pop-Location
+        }
+        $vPath = (Resolve-Path .\v).Path
+        Add-Content -Path $env:GITHUB_PATH -Value $vPath
+        $version = ( & .\v\v.exe version).Trim()
+        $revision = ( & git -C v rev-parse HEAD).Trim()
+        Assert-NativeCommand "Could not inspect V revision"
+        "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Log V version
+      run: v version
+    - name: Save V compiler cache
+      if: ${{ steps.restore-v-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: v
+        key: ${{ steps.restore-v-cache.outputs.cache-primary-key }}
+    - name: Resolve vglyph revision
+      id: vglyph
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
+        if ($LASTEXITCODE -ne 0) {
+          throw "Could not resolve vglyph revision"
+        }
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Restore vcpkg binary cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        restore-keys: |
+          windows-vcpkg-x64-windows-pango-freetype-
+    - name: Restore V module cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.vmodules/vglyph
+        key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
+        restore-keys: |
+          windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
+          windows-vmodules-vglyph-
+    - name: Install pango and freetype
+      shell: pwsh
+      run: |
+        New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
+        vcpkg install pango freetype
+    - name: Ensure vglyph revision
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Assert-NativeCommand($Message) {
+          if ($LASTEXITCODE -ne 0) {
+            throw $Message
+          }
+        }
+        $expectedRevision = '${{ steps.vglyph.outputs.revision }}'
+        $vglyphPath = Join-Path $HOME '.vmodules\vglyph'
+        if (Test-Path (Join-Path $vglyphPath '.git')) {
+          $cachedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
+          Assert-NativeCommand "Could not inspect cached vglyph revision"
+          if ($cachedRevision -ne $expectedRevision) {
+            Write-Host "Cached vglyph revision $cachedRevision does not match expected $expectedRevision; rebuilding."
+            Remove-Item -Recurse -Force $vglyphPath
+          }
+        } elseif (Test-Path $vglyphPath) {
+          Remove-Item -Recurse -Force $vglyphPath
+        }
+        if (-not (Test-Path $vglyphPath)) {
+          $vmodulesPath = Split-Path -Parent $vglyphPath
+          New-Item -ItemType Directory -Force -Path $vmodulesPath | Out-Null
+          git init $vglyphPath
+          Assert-NativeCommand "git init vglyph failed"
+          git -C $vglyphPath remote add origin https://github.com/vlang/vglyph
+          Assert-NativeCommand "git remote add vglyph failed"
+          git -C $vglyphPath fetch --depth 1 origin $expectedRevision
+          Assert-NativeCommand "git fetch vglyph failed"
+          git -C $vglyphPath checkout --detach FETCH_HEAD
+          Assert-NativeCommand "git checkout vglyph failed"
+        }
+    - name: Install vglyph
+      run: v install vglyph
+    - name: Checkout gui
+      uses: actions/checkout@v4
+      with:
+        path: gui
+    - name: Run Windows setup preflight
+      env:
+        GUI_WINDOWS_PREFLIGHT_CC: clang
+      run: v run gui/_windows_preflight.vsh
+    - name: Run noninteractive native tests
+      run: >
+        v -no-parallel -cc clang test
+        gui/_native_dialog_test.v
+        gui/_native_print_test.v
+        gui/_native_notification_test.v
+        gui/nativebridge/_bridge_ex_test.v
+        gui/nativebridge/_readback_abi_test.v
+    - name: Compile native smoke examples
+      run: |
+        v -no-parallel -cc clang -W -o dialogs_smoke.exe gui/examples/dialogs.v
+        v -no-parallel -cc clang -W -o printing_smoke.exe gui/examples/printing.v
+        v -no-parallel -cc clang -W -o notification_smoke.exe gui/examples/native_notification.v
+        if ('${{ inputs.run_d3d11 }}' -eq 'true') {
+          $d3dExamples = @(
+            @{ Name = 'printing'; Path = 'gui/examples/printing.v'; Warn = $true },
+            @{ Name = 'gradient_demo'; Path = 'gui/examples/gradient_demo.v'; Warn = $true },
+            @{ Name = 'shadow_demo'; Path = 'gui/examples/shadow_demo.v'; Warn = $true },
+            @{ Name = 'blur_demo'; Path = 'gui/examples/blur_demo.v'; Warn = $true },
+            @{ Name = 'image_clip'; Path = 'gui/examples/image_clip.v'; Warn = $true },
+            @{ Name = 'svg_demo'; Path = 'gui/examples/svg_demo.v'; Warn = $true },
+            @{ Name = 'custom_shader'; Path = 'gui/examples/custom_shader.v'; Warn = $true },
+            @{ Name = 'showcase'; Path = 'gui/examples/showcase.v'; Warn = $false }
+          )
+          foreach ($example in $d3dExamples) {
+            $args = @('-no-parallel', '-cc', 'clang', '-d', 'sokol_d3d11')
+            if ($example.Warn) {
+              $args += '-W'
+            }
+            $args += @('-o', "$($example.Name)_d3d11_smoke.exe", $example.Path)
+            v @args
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
             }
           }
+        }
 
   mingw:
     name: MinGW native smoke (exploratory)
@@ -406,94 +671,172 @@ jobs:
     continue-on-error: true
     if: ${{ !inputs.prewarm_deps_only && inputs.run_mingw }}
     steps:
-      - name: Install V
-        shell: pwsh
-        run: |
-          $ProgressPreference = 'SilentlyContinue'
-          $asset = 'v_windows.zip'
-          $url = "https://github.com/vlang/v/releases/download/$env:V_VERSION/$asset"
-          Invoke-WebRequest -Uri $url -OutFile $asset
-          Expand-Archive -Path $asset -DestinationPath . -Force
-          $vPath = (Resolve-Path .\v).Path
-          Add-Content -Path $env:GITHUB_PATH -Value $vPath
-      - name: Verify V version
-        shell: pwsh
-        run: |
-          $vVersion = v version
-          Write-Host $vVersion
-          if ($vVersion -notlike "*$env:V_VERSION*") {
-            throw "Expected V version $env:V_VERSION"
+    - name: Resolve V revision
+      id: v
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Restore V compiler cache
+      id: restore-v-cache
+      uses: actions/cache/restore@v4
+      with:
+        path: v
+        key: windows-v-compiler-${{ steps.v.outputs.revision }}-v1
+    - name: Install V
+      id: install-v
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        function Assert-NativeCommand($Message) {
+          if ($LASTEXITCODE -ne 0) {
+            throw $Message
           }
-      - name: Install MSYS2 MinGW dependencies
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          path-type: inherit
-          install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-pango
-            mingw-w64-x86_64-freetype
-      - name: Verify V version in MSYS2
-        shell: msys2 {0}
-        run: |
-          v_version="$(v version)"
-          echo "$v_version"
-          case "$v_version" in
-            *"$V_VERSION"*) ;;
-            *)
-              echo "Expected V version $V_VERSION"
-              exit 1
-              ;;
-          esac
-      - name: Install vglyph
-        shell: msys2 {0}
-        run: v install vglyph
-      - name: Checkout gui
-        uses: actions/checkout@v4
-        with:
-          path: gui
-      - name: Run Windows setup preflight
-        shell: msys2 {0}
-        env:
-          GUI_WINDOWS_PREFLIGHT_CC: gcc
-        run: v run gui/_windows_preflight.vsh
-      - name: Run noninteractive native tests
-        shell: msys2 {0}
-        run: >
-          v -no-parallel -cc gcc test
-          gui/_native_dialog_test.v
-          gui/_native_print_test.v
-          gui/_native_notification_test.v
-          gui/nativebridge/_bridge_ex_test.v
-          gui/nativebridge/_readback_abi_test.v
-      - name: Compile native smoke examples
-        shell: msys2 {0}
-        run: |
-          v -no-parallel -cc gcc -W -o dialogs_smoke.exe gui/examples/dialogs.v
-          v -no-parallel -cc gcc -W -o printing_smoke.exe gui/examples/printing.v
-          v -no-parallel -cc gcc -W -o notification_smoke.exe gui/examples/native_notification.v
-          if [ '${{ inputs.run_d3d11 }}' = 'true' ]; then
-            for item in \
-              'printing:gui/examples/printing.v:-W' \
-              'gradient_demo:gui/examples/gradient_demo.v:-W' \
-              'shadow_demo:gui/examples/shadow_demo.v:-W' \
-              'blur_demo:gui/examples/blur_demo.v:-W' \
-              'image_clip:gui/examples/image_clip.v:-W' \
-              'svg_demo:gui/examples/svg_demo.v:-W' \
-              'custom_shader:gui/examples/custom_shader.v:-W' \
-              'showcase:gui/examples/showcase.v:'
-            do
-              IFS=':' read -r name path warn_flag <<< "$item"
-              args=(-no-parallel -cc gcc -d sokol_d3d11)
-              if [ -n "$warn_flag" ]; then
-                args+=("$warn_flag")
-              fi
-              args+=(-o "${name}_d3d11_smoke.exe" "$path")
-              v "${args[@]}"
-              if [ "$?" -ne 0 ]; then
-                exit 1
-              fi
-            done
+        }
+        $expectedRevision = '${{ steps.v.outputs.revision }}'
+        if (Test-Path .\v\v.exe) {
+          $cachedRevision = ( & git -C v rev-parse HEAD).Trim()
+          Assert-NativeCommand "Could not inspect cached V revision"
+          if ($cachedRevision -ne $expectedRevision) {
+            Write-Host "Cached V revision $cachedRevision does not match expected $expectedRevision; rebuilding."
+            Remove-Item -Recurse -Force .\v
+          }
+        }
+        if (-not (Test-Path .\v\v.exe)) {
+          if (Test-Path .\v) {
+            Remove-Item -Recurse -Force .\v
+          }
+          git init v
+          Assert-NativeCommand "git init failed"
+          git -C v remote add origin https://github.com/vlang/v
+          Assert-NativeCommand "git remote add failed"
+          git -C v fetch --depth 1 origin $expectedRevision
+          Assert-NativeCommand "git fetch failed"
+          git -C v checkout --detach FETCH_HEAD
+          Assert-NativeCommand "git checkout failed"
+          Push-Location v
+          cmd /c makev.bat
+          if ($LASTEXITCODE -ne 0) {
+            throw "makev.bat failed"
+          }
+          Pop-Location
+        }
+        $vPath = (Resolve-Path .\v).Path
+        Add-Content -Path $env:GITHUB_PATH -Value $vPath
+        $version = ( & .\v\v.exe version).Trim()
+        $revision = ( & git -C v rev-parse HEAD).Trim()
+        Assert-NativeCommand "Could not inspect V revision"
+        "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Log V version
+      run: v version
+    - name: Save V compiler cache
+      if: ${{ steps.restore-v-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: v
+        key: ${{ steps.restore-v-cache.outputs.cache-primary-key }}
+    - name: Resolve vglyph revision
+      id: vglyph
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
+        if ($LASTEXITCODE -ne 0) {
+          throw "Could not resolve vglyph revision"
+        }
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Restore V module cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.vmodules/vglyph
+        key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
+        restore-keys: |
+          windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
+          windows-vmodules-vglyph-
+    - name: Install MSYS2 MinGW dependencies
+      uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: true
+        path-type: inherit
+        install: >-
+          mingw-w64-x86_64-gcc
+          mingw-w64-x86_64-pkgconf
+          mingw-w64-x86_64-pango
+          mingw-w64-x86_64-freetype
+    - name: Verify V version in MSYS2
+      shell: msys2 {0}
+      run: |
+        v_version="$(v version)"
+        echo "$v_version"
+    - name: Ensure vglyph revision
+      shell: msys2 {0}
+      run: |
+        set -e
+        expected_revision='${{ steps.vglyph.outputs.revision }}'
+        vglyph_path="$HOME/.vmodules/vglyph"
+        if [ -d "$vglyph_path/.git" ]; then
+          cached_revision=$(git -C "$vglyph_path" rev-parse HEAD | tr -d '[:space:]')
+          if [ "$cached_revision" != "$expected_revision" ]; then
+            echo "Cached vglyph revision $cached_revision does not match expected $expected_revision; rebuilding."
+            rm -rf "$vglyph_path"
           fi
+        elif [ -e "$vglyph_path" ]; then
+          rm -rf "$vglyph_path"
+        fi
+        if [ ! -e "$vglyph_path" ]; then
+          mkdir -p "$(dirname "$vglyph_path")"
+          git init "$vglyph_path"
+          git -C "$vglyph_path" remote add origin https://github.com/vlang/vglyph
+          git -C "$vglyph_path" fetch --depth 1 origin "$expected_revision"
+          git -C "$vglyph_path" checkout --detach FETCH_HEAD
+        fi
+    - name: Checkout gui
+      uses: actions/checkout@v4
+      with:
+        path: gui
+    - name: Run Windows setup preflight
+      shell: msys2 {0}
+      env:
+        GUI_WINDOWS_PREFLIGHT_CC: gcc
+      run: v run gui/_windows_preflight.vsh
+    - name: Run noninteractive native tests
+      shell: msys2 {0}
+      run: >
+        v -no-parallel -cc gcc test
+        gui/_native_dialog_test.v
+        gui/_native_print_test.v
+        gui/_native_notification_test.v
+        gui/nativebridge/_bridge_ex_test.v
+        gui/nativebridge/_readback_abi_test.v
+    - name: Compile native smoke examples
+      shell: msys2 {0}
+      run: |
+        v -no-parallel -cc gcc -W -o dialogs_smoke.exe gui/examples/dialogs.v
+        v -no-parallel -cc gcc -W -o printing_smoke.exe gui/examples/printing.v
+        v -no-parallel -cc gcc -W -o notification_smoke.exe gui/examples/native_notification.v
+        if [ '${{ inputs.run_d3d11 }}' = 'true' ]; then
+          for item in \
+            'printing:gui/examples/printing.v:-W' \
+            'gradient_demo:gui/examples/gradient_demo.v:-W' \
+            'shadow_demo:gui/examples/shadow_demo.v:-W' \
+            'blur_demo:gui/examples/blur_demo.v:-W' \
+            'image_clip:gui/examples/image_clip.v:-W' \
+            'svg_demo:gui/examples/svg_demo.v:-W' \
+            'custom_shader:gui/examples/custom_shader.v:-W' \
+            'showcase:gui/examples/showcase.v:'
+          do
+            IFS=':' read -r name path warn_flag <<< "$item"
+            args=(-no-parallel -cc gcc -d sokol_d3d11)
+            if [ -n "$warn_flag" ]; then
+              args+=("$warn_flag")
+            fi
+            args+=(-o "${name}_d3d11_smoke.exe" "$path")
+            v "${args[@]}"
+            if [ "$?" -ne 0 ]; then
+              exit 1
+            fi
+          done
+        fi

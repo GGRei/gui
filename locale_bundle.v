@@ -1,6 +1,6 @@
 module gui
 
-import json
+import json2
 import os
 
 // JSON-friendly intermediate structs for locale bundle decoding.
@@ -53,7 +53,7 @@ pub fn locale_parse(content string) !Locale {
 	if trimmed.len == 0 || !trimmed.starts_with('{') || !trimmed.ends_with('}') {
 		return error('invalid JSON: expected object')
 	}
-	bundle := json.decode(LocaleBundle, trimmed) or { return error('invalid JSON: ${err}') }
+	bundle := json2.decode[LocaleBundle](trimmed) or { return error('invalid JSON: ${err}') }
 	return bundle.to_locale()
 }
 
