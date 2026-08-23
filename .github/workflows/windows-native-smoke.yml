@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       run_mingw:
-        description: "Also run exploratory MinGW/MSYS2 smoke"
+        description: "Also run UCRT64 GCC/Clang smoke and issue #74 static-link diagnostics"
         type: boolean
         default: false
       run_d3d11:
@@ -665,11 +665,18 @@ jobs:
         }
 
   mingw:
-    name: MinGW native smoke (exploratory)
+    name: MSYS2 UCRT64 ${{ matrix.cc }} native smoke
     runs-on: windows-latest
-    timeout-minutes: 30
-    continue-on-error: true
+    timeout-minutes: 45
     if: ${{ !inputs.prewarm_deps_only && inputs.run_mingw }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - cc: gcc
+          compiler_package: mingw-w64-ucrt-x86_64-gcc
+        - cc: clang
+          compiler_package: mingw-w64-ucrt-x86_64-clang
     steps:
     - name: Resolve V revision
       id: v
@@ -729,10 +736,13 @@ jobs:
         Assert-NativeCommand "Could not inspect V revision"
         "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
-    - name: Log V version
-      run: v version
+    - name: Log V version and revision
+      shell: pwsh
+      run: |
+        v version
+        git -C v rev-parse HEAD
     - name: Save V compiler cache
-      if: ${{ steps.restore-v-cache.outputs.cache-hit != 'true' }}
+      if: ${{ matrix.cc == 'gcc' && steps.restore-v-cache.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v4
       with:
         path: v
@@ -755,22 +765,44 @@ jobs:
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
           windows-vmodules-vglyph-
-    - name: Install MSYS2 MinGW dependencies
+    - name: Install MSYS2 UCRT64 dependencies
+      id: msys2
       uses: msys2/setup-msys2@v2
       with:
-        msystem: MINGW64
+        msystem: UCRT64
         update: true
         path-type: inherit
         install: >-
-          mingw-w64-x86_64-gcc
-          mingw-w64-x86_64-pkgconf
-          mingw-w64-x86_64-pango
-          mingw-w64-x86_64-freetype
-    - name: Verify V version in MSYS2
+          ${{ matrix.compiler_package }}
+          mingw-w64-ucrt-x86_64-binutils
+          mingw-w64-ucrt-x86_64-pkgconf
+          mingw-w64-ucrt-x86_64-pango
+          mingw-w64-ucrt-x86_64-freetype
+          mingw-w64-ucrt-x86_64-gettext-runtime
+          mingw-w64-ucrt-x86_64-libiconv
+    - name: Verify V and compiler versions in MSYS2
       shell: msys2 {0}
       run: |
-        v_version="$(v version)"
-        echo "$v_version"
+        set -euo pipefail
+        cc='${{ matrix.cc }}'
+        if [ "$MSYSTEM" != UCRT64 ]; then
+          echo "Expected UCRT64, got $MSYSTEM" >&2
+          exit 1
+        fi
+        v version
+        command -v "$cc"
+        command -v pkgconf
+        "$cc" --version
+        pkgconf --version
+        for tool in "$cc" pkgconf ld nm objdump; do
+          case "$(command -v "$tool")" in
+            "$MINGW_PREFIX"/bin/*) ;;
+            *)
+              echo "$tool did not resolve inside UCRT64: $(command -v "$tool")" >&2
+              exit 1
+              ;;
+          esac
+        done
     - name: Ensure vglyph revision
       shell: msys2 {0}
       run: |
@@ -797,12 +829,22 @@ jobs:
       uses: actions/checkout@v4
       with:
         path: gui
+    - name: "Run issue #74 UCRT64 static-link diagnostics"
+      id: issue74
+      continue-on-error: true
+      shell: msys2 {0}
+      env:
+        MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+      run: >-
+        bash gui/.github/workflows/issue74/run_ucrt64_static_diagnostics.sh
+        '${{ matrix.cc }}' ./v/v.exe gui issue74-artifacts
     - name: Run Windows setup preflight
       shell: msys2 {0}
       env:
-        GUI_WINDOWS_PREFLIGHT_CC: gcc
+        GUI_WINDOWS_PREFLIGHT_CC: ${{ matrix.cc }}
       run: v run gui/_windows_preflight.vsh
     - name: Run noninteractive native tests
+      if: ${{ matrix.cc == 'gcc' }}
       shell: msys2 {0}
       run: >
         v -no-parallel -cc gcc test
@@ -812,6 +854,7 @@ jobs:
         gui/nativebridge/_bridge_ex_test.v
         gui/nativebridge/_readback_abi_test.v
     - name: Compile native smoke examples
+      if: ${{ matrix.cc == 'gcc' }}
       shell: msys2 {0}
       run: |
         v -no-parallel -cc gcc -W -o dialogs_smoke.exe gui/examples/dialogs.v
@@ -839,4 +882,20 @@ jobs:
               exit 1
             fi
           done
+        fi
+    - name: "Upload issue #74 diagnostic artifacts"
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: issue74-ucrt64-${{ matrix.cc }}-${{ github.run_attempt }}
+        path: issue74-artifacts/${{ matrix.cc }}
+        if-no-files-found: warn
+        retention-days: 14
+    - name: "Enforce issue #74 required diagnostics"
+      if: ${{ always() }}
+      shell: msys2 {0}
+      run: |
+        if [ '${{ steps.issue74.outcome }}' != success ]; then
+          echo "Required issue #74 diagnostics failed for ${{ matrix.cc }}." >&2
+          exit 1
         fi
