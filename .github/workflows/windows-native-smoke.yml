@@ -114,13 +114,27 @@ jobs:
           throw "Could not resolve vglyph revision"
         }
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Resolve vcpkg revision
+      id: vcpkg
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $vcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Split-Path -Parent $vcpkgExe }
+        $revision = (& git -C $vcpkgRoot rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+          throw "Could not resolve the vcpkg checkout revision at $vcpkgRoot"
+        }
+        & $vcpkgExe version
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore vcpkg binary cache
-      uses: actions/cache@v4
+      id: restore-vcpkg-cache
+      uses: actions/cache/restore@v4
       with:
         path: ${{ env.VCPKG_BINARY_CACHE }}
-        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        key: windows-vcpkg-binary-x64-windows-pango-freetype-${{ steps.vcpkg.outputs.revision }}-v3
         restore-keys: |
-          windows-vcpkg-x64-windows-pango-freetype-
+          windows-vcpkg-binary-x64-windows-pango-freetype-
     - name: Restore V module cache
       uses: actions/cache@v4
       with:
@@ -134,6 +148,12 @@ jobs:
       run: |
         New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
         vcpkg install pango freetype
+    - name: Save vcpkg binary cache
+      if: ${{ steps.restore-vcpkg-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
     - name: Expose vcpkg pkg-config paths
       shell: pwsh
       run: |
@@ -317,13 +337,27 @@ jobs:
           throw "Could not resolve vglyph revision"
         }
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Resolve vcpkg revision
+      id: vcpkg
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $vcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Split-Path -Parent $vcpkgExe }
+        $revision = (& git -C $vcpkgRoot rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+          throw "Could not resolve the vcpkg checkout revision at $vcpkgRoot"
+        }
+        & $vcpkgExe version
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore vcpkg binary cache
-      uses: actions/cache@v4
+      id: restore-vcpkg-cache
+      uses: actions/cache/restore@v4
       with:
         path: ${{ env.VCPKG_BINARY_CACHE }}
-        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        key: windows-vcpkg-binary-x64-windows-pango-freetype-${{ steps.vcpkg.outputs.revision }}-v3
         restore-keys: |
-          windows-vcpkg-x64-windows-pango-freetype-
+          windows-vcpkg-binary-x64-windows-pango-freetype-
     - name: Restore V module cache
       uses: actions/cache@v4
       with:
@@ -337,6 +371,12 @@ jobs:
       run: |
         New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
         vcpkg install pango freetype
+    - name: Save vcpkg binary cache
+      if: ${{ steps.restore-vcpkg-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
     - name: Expose vcpkg pkg-config paths
       shell: pwsh
       run: |
@@ -567,13 +607,27 @@ jobs:
           throw "Could not resolve vglyph revision"
         }
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Resolve vcpkg revision
+      id: vcpkg
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $vcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Split-Path -Parent $vcpkgExe }
+        $revision = (& git -C $vcpkgRoot rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+          throw "Could not resolve the vcpkg checkout revision at $vcpkgRoot"
+        }
+        & $vcpkgExe version
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore vcpkg binary cache
-      uses: actions/cache@v4
+      id: restore-vcpkg-cache
+      uses: actions/cache/restore@v4
       with:
         path: ${{ env.VCPKG_BINARY_CACHE }}
-        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        key: windows-vcpkg-binary-x64-windows-pango-freetype-${{ steps.vcpkg.outputs.revision }}-v3
         restore-keys: |
-          windows-vcpkg-x64-windows-pango-freetype-
+          windows-vcpkg-binary-x64-windows-pango-freetype-
     - name: Restore V module cache
       uses: actions/cache@v4
       with:
@@ -587,6 +641,79 @@ jobs:
       run: |
         New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
         vcpkg install pango freetype
+    - name: Save vcpkg binary cache
+      if: ${{ steps.restore-vcpkg-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
+    - name: Expose vcpkg pkg-config paths
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $triplet = 'x64-windows'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $roots = @()
+        if ($vcpkgExe) {
+          $roots += Split-Path -Parent $vcpkgExe
+        }
+        if ($env:VCPKG_ROOT) {
+          $roots += $env:VCPKG_ROOT
+        }
+        $vcpkgRoot = $null
+        foreach ($root in ($roots | Select-Object -Unique)) {
+          if (Test-Path (Join-Path $root "installed\$triplet")) {
+            $vcpkgRoot = $root
+            break
+          }
+        }
+        if (-not $vcpkgRoot) {
+          throw "Could not find vcpkg installed\$triplet from vcpkg.exe or VCPKG_ROOT"
+        }
+        $tripletRoot = Join-Path $vcpkgRoot "installed\$triplet"
+        $pkgConfigDirs = @(
+          (Join-Path $tripletRoot 'lib\pkgconfig'),
+          (Join-Path $tripletRoot 'share\pkgconfig')
+        ) | Where-Object { Test-Path $_ }
+        if ($pkgConfigDirs.Count -eq 0) {
+          throw "No pkgconfig directories found under $tripletRoot"
+        }
+        $pkgConfigPath = $pkgConfigDirs -join ';'
+        "PKG_CONFIG_PATH=$pkgConfigPath" | Add-Content -Path $env:GITHUB_ENV
+        $env:PKG_CONFIG_PATH = $pkgConfigPath
+        $pathEntries = @()
+        $binDir = Join-Path $tripletRoot 'bin'
+        if (Test-Path $binDir) {
+          $pathEntries += $binDir
+        }
+        $pkgconfDir = Join-Path $tripletRoot 'tools\pkgconf'
+        if (Test-Path $pkgconfDir) {
+          $pathEntries += $pkgconfDir
+        }
+        foreach ($entry in $pathEntries) {
+          $entry | Add-Content -Path $env:GITHUB_PATH
+        }
+        if ($pathEntries.Count -gt 0) {
+          $env:PATH = ($pathEntries + $env:PATH) -join ';'
+        }
+        if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) {
+          $pkgconf = Get-Command pkgconf -ErrorAction SilentlyContinue
+          if ($pkgconf) {
+            $shimDir = Join-Path $env:RUNNER_TEMP 'pkg-config-shim'
+            New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+            Set-Content -Path (Join-Path $shimDir 'pkg-config.cmd') -Encoding ascii -Value @(
+              '@echo off',
+              '"' + $pkgconf.Source + '" %*'
+            )
+            $shimDir | Add-Content -Path $env:GITHUB_PATH
+            $env:PATH = "$shimDir;$env:PATH"
+          }
+        }
+        $pkgConfig = Get-Command pkg-config -ErrorAction Stop
+        & $pkgConfig.Source --exists freetype2 pango pangoft2
+        if ($LASTEXITCODE -ne 0) {
+          throw "pkg-config could not resolve freetype2 pango pangoft2"
+        }
     - name: Ensure vglyph revision
       shell: pwsh
       run: |

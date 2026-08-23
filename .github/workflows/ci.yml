@@ -256,14 +256,27 @@ jobs:
             throw "Could not resolve vglyph revision"
           }
           "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Resolve vcpkg revision
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+          $vcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Split-Path -Parent $vcpkgExe }
+          $revision = (& git -C $vcpkgRoot rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+            throw "Could not resolve the vcpkg checkout revision at $vcpkgRoot"
+          }
+          & $vcpkgExe version
+          "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
       - name: Restore vcpkg binary cache
         id: restore-vcpkg-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE }}
-          key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v2
+          key: windows-vcpkg-binary-x64-windows-pango-freetype-${{ steps.vcpkg.outputs.revision }}-v3
           restore-keys: |
-            windows-vcpkg-x64-windows-pango-freetype-
+            windows-vcpkg-binary-x64-windows-pango-freetype-
       - name: Restore V module cache
         id: restore-vglyph-cache
         uses: actions/cache/restore@v4
