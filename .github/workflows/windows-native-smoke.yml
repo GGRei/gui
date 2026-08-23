@@ -822,6 +822,8 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 90
     if: ${{ !inputs.prewarm_deps_only && inputs.run_mingw }}
+    env:
+      VMODULES: ${{ github.workspace }}\.vmodules
     strategy:
       fail-fast: false
       matrix:
@@ -910,7 +912,7 @@ jobs:
     - name: Restore V module cache
       uses: actions/cache@v4
       with:
-        path: ~/.vmodules/vglyph
+        path: ${{ github.workspace }}\.vmodules\vglyph
         key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
@@ -937,6 +939,10 @@ jobs:
       run: |
         set -euo pipefail
         cc='${{ matrix.cc }}'
+        case "$cc" in
+          gcc) cxx=g++ ;;
+          clang) cxx=clang++ ;;
+        esac
         export PATH="$PWD/v:$PATH"
         if [ "$MSYSTEM" != UCRT64 ]; then
           echo "Expected UCRT64, got $MSYSTEM" >&2
@@ -944,12 +950,14 @@ jobs:
         fi
         v version
         command -v "$cc"
+        command -v "$cxx"
         command -v pkgconf
         command -v pkg-config
         "$cc" --version
+        "$cxx" --version
         pkgconf --version
         pkg-config --version
-        for tool in "$cc" pkgconf pkg-config ld nm objdump; do
+        for tool in "$cc" "$cxx" pkgconf pkg-config ld nm objdump; do
           case "$(command -v "$tool")" in
             "$MINGW_PREFIX"/bin/*) ;;
             *)
@@ -961,9 +969,11 @@ jobs:
     - name: Ensure vglyph revision
       shell: msys2 {0}
       run: |
-        set -e
+        set -euo pipefail
         expected_revision='${{ steps.vglyph.outputs.revision }}'
-        vglyph_path="$HOME/.vmodules/vglyph"
+        vmodules_posix="$PWD/.vmodules"
+        export VMODULES="$(cygpath -w "$vmodules_posix")"
+        vglyph_path="$vmodules_posix/vglyph"
         if [ -d "$vglyph_path/.git" ]; then
           cached_revision=$(git -C "$vglyph_path" rev-parse HEAD | tr -d '[:space:]')
           if [ "$cached_revision" != "$expected_revision" ]; then
@@ -980,10 +990,21 @@ jobs:
           git -C "$vglyph_path" fetch --depth 1 origin "$expected_revision"
           git -C "$vglyph_path" checkout --detach FETCH_HEAD
         fi
+        test -f "$vglyph_path/v.mod"
+        printf 'VMODULES=%s\n' "$VMODULES"
+        git -C "$vglyph_path" rev-parse HEAD
     - name: Checkout gui
       uses: actions/checkout@v4
       with:
         path: gui
+    - name: Validate native V module resolution
+      shell: msys2 {0}
+      run: |
+        set -euo pipefail
+        vmodules_posix="$PWD/.vmodules"
+        export VMODULES="$(cygpath -w "$vmodules_posix")"
+        test -f "$vmodules_posix/vglyph/v.mod"
+        ./v/v.exe -check gui/.github/workflows/issue74/vglyph_probe.v
     - name: "Run issue #74 UCRT64 static-link diagnostics"
       id: issue74
       continue-on-error: true

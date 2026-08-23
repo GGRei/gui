@@ -13,7 +13,8 @@ gui_dir="$3"
 artifact_root="$4"
 
 case "$cc" in
-	gcc|clang) ;;
+	gcc) cxx=g++ ;;
+	clang) cxx=clang++ ;;
 	*)
 		echo "unsupported compiler: $cc" >&2
 		exit 2
@@ -40,6 +41,19 @@ for required_tool in timeout cygpath powershell.exe objdump; do
 		exit 2
 	fi
 done
+
+: "${VMODULES:?VMODULES is not set; point it at the Windows-visible V modules directory}"
+vmodules_dir="$(cygpath -u "$VMODULES")"
+vmodules_windows="$(cygpath -w "$vmodules_dir")"
+export VMODULES="$vmodules_windows"
+if [ ! -f "$vmodules_dir/vglyph/v.mod" ]; then
+	echo "vglyph module not found below VMODULES: $vmodules_dir/vglyph/v.mod" >&2
+	exit 2
+fi
+if ! command -v "$cxx" >/dev/null 2>&1; then
+	echo "required C++ linker driver not found: $cxx" >&2
+	exit 2
+fi
 
 out_dir="$artifact_root/$cc"
 logs_dir="$out_dir/logs"
@@ -197,7 +211,7 @@ check_static_pe() {
 
 	while IFS= read -r dll_name; do
 		dll_name="${dll_name#*:}"
-		dll_name="${dll_name#${dll_name%%[![:space:]]*}}"
+		dll_name="${dll_name#"${dll_name%%[![:space:]]*}"}"
 		dll_name="${dll_name%$'\r'}"
 		[ -n "$dll_name" ] || continue
 		lower_name="${dll_name,,}"
@@ -293,13 +307,13 @@ write_environment_report() {
 
 		echo
 		echo '=== selected environment ==='
-		for name in MSYSTEM MINGW_PREFIX MSYS2_LOCATION PKG_CONFIG_PATH PKG_CONFIG_LIBDIR CFLAGS CPPFLAGS LDFLAGS VFLAGS ImageOS ImageVersion RUNNER_OS RUNNER_ARCH; do
+		for name in MSYSTEM MINGW_PREFIX MSYS2_LOCATION VMODULES HOME USERPROFILE PKG_CONFIG_PATH PKG_CONFIG_LIBDIR CFLAGS CPPFLAGS LDFLAGS VFLAGS ImageOS ImageVersion RUNNER_OS RUNNER_ARCH; do
 			printf '%s=%s\n' "$name" "${!name-}"
 		done
 
 		echo
 		echo '=== command resolution ==='
-		for name in v gcc clang ld nm objdump pkg-config pkgconf; do
+		for name in v gcc g++ clang clang++ ld nm objdump pkg-config pkgconf; do
 			printf '%s: ' "$name"
 			command -v "$name" 2>&1 || true
 		done
@@ -309,6 +323,7 @@ write_environment_report() {
 		echo '=== versions and revisions ==='
 		"$v_exe" version 2>&1 || true
 		"$cc" --version 2>&1 || true
+		"$cxx" --version 2>&1 || true
 		"$cc" -dumpmachine 2>&1 || true
 		"$cc" --print-target-triple 2>&1 || true
 		linker_driver="$("$cc" -print-prog-name=ld 2>&1 || true)"
@@ -327,7 +342,7 @@ write_environment_report() {
 		pkgconf --version 2>&1 || true
 		git -C "$(dirname "$v_exe")" rev-parse HEAD 2>&1 || true
 		git -C "$gui_dir" rev-parse HEAD 2>&1 || true
-		git -C "$HOME/.vmodules/vglyph" rev-parse HEAD 2>&1 || true
+		git -C "$vmodules_dir/vglyph" rev-parse HEAD 2>&1 || true
 
 		echo
 		echo '=== installed packages ==='
@@ -406,26 +421,66 @@ copy_generated_files() {
 }
 
 verify_expected_iconv_outcome() {
-	local name="$1"
-	local build_name="${name}_build"
-	local build_rc="${case_rc[$build_name]:-not-run}"
-	local build_log="$logs_dir/$build_name.log"
-	local verify_log="$logs_dir/${name}_iconv_boundary.log"
+	local negative_name="$1"
+	local positive_name="$2"
+	local required="$3"
+	local negative_build_name="${negative_name}_build"
+	local positive_build_name="${positive_name}_build"
+	local negative_rc="${case_rc[$negative_build_name]:-not-run}"
+	local positive_rc="${case_rc[$positive_build_name]:-not-run}"
+	local negative_log="$logs_dir/$negative_build_name.log"
+	local verify_log="$logs_dir/${negative_name}_iconv_boundary.log"
 	local verify_rc=0
-	local symbol_pattern='(undefined reference|undefined symbol|unresolved external).*(lib)?iconv|(lib)?iconv.*(undefined reference|undefined symbol|unresolved external)'
-	if [ "$build_rc" = 0 ]; then
+	local undefined_pattern='undefined reference|undefined symbol|unresolved external'
+	local allowed_iconv_pattern='(libiconv_set_relocation_prefix|libiconv_open|libiconv_close|libiconv)'
+	local root_error_pattern='cannot import|cannot find|cannot open|no such file or directory|file format not recognized|file not recognized|permission denied|timed out|internal compiler error|segmentation fault|fatal error'
+	local line
+	local -a undefined_lines=()
+	local -a non_iconv_lines=()
+
+	if [ "$positive_rc" != 0 ]; then
+		verify_rc=1
+		printf 'The positive control %s failed with exit %s; the iconv boundary is indeterminate.\n' \
+			"$positive_name" "$positive_rc" > "$verify_log"
+	elif [ "$negative_rc" = 0 ]; then
 		echo 'The no-extra-iconv control linked successfully; the package snapshot no longer exposes the expected boundary.' > "$verify_log"
-	elif [ -f "$build_log" ] && grep -Eiq "$symbol_pattern" "$build_log"; then
+	elif [ "$negative_rc" = 124 ] || [ "$negative_rc" = 137 ]; then
+		verify_rc=1
+		echo "The no-extra-iconv control timed out or was killed (exit $negative_rc); the iconv boundary is indeterminate." > "$verify_log"
+	elif [ ! -f "$negative_log" ]; then
+		verify_rc=1
+		echo "The no-extra-iconv control failed with exit $negative_rc, but its build log is missing." > "$verify_log"
+	elif grep -Eiq "$root_error_pattern" "$negative_log"; then
+		verify_rc=1
 		{
-			echo 'The no-extra-iconv control failed at the expected iconv symbol boundary:'
-			grep -Ei "$symbol_pattern" "$build_log" || true
+			echo 'The no-extra-iconv control has a non-linker root error; the iconv boundary is indeterminate:'
+			grep -Ei "$root_error_pattern" "$negative_log" || true
 		} > "$verify_log"
 	else
-		verify_rc=1
-		echo "The no-extra-iconv control failed with exit $build_rc, but no undefined iconv symbol was found." > "$verify_log"
+		mapfile -t undefined_lines < <(grep -Ei "$undefined_pattern" "$negative_log" || true)
+		for line in "${undefined_lines[@]}"; do
+			if ! grep -Eiq "($undefined_pattern).*([^[:alnum:]_]|^)$allowed_iconv_pattern([^[:alnum:]_]|$)" <<< "$line"; then
+				non_iconv_lines+=("$line")
+			fi
+		done
+		if [ "${#undefined_lines[@]}" -eq 0 ]; then
+			verify_rc=1
+			echo "The no-extra-iconv control failed with exit $negative_rc, but no undefined symbol was found." > "$verify_log"
+		elif [ "${#non_iconv_lines[@]}" -ne 0 ]; then
+			verify_rc=1
+			{
+				echo 'The no-extra-iconv control has undefined symbols outside the allowed iconv boundary:'
+				printf '%s\n' "${non_iconv_lines[@]}"
+			} > "$verify_log"
+		else
+			{
+				echo 'Every undefined symbol in the no-extra-iconv control is at the expected iconv boundary:'
+				printf '%s\n' "${undefined_lines[@]}"
+			} > "$verify_log"
+		fi
 	fi
 	cat "$verify_log"
-	record_result "${name}_iconv_boundary" oracle yes "$verify_rc"
+	record_result "${negative_name}_iconv_boundary" oracle "$required" "$verify_rc"
 }
 
 verify_build_flag() {
@@ -524,10 +579,19 @@ write_rsp_order_report() {
 write_summary() {
 	local no_iconv_rc="${case_rc[c_static_noiconv_build]:-not-run}"
 	local with_iconv_rc="${case_rc[c_static_iconv_build]:-not-run}"
+	local raw_pango_oracle_rc="${case_rc[c_static_noiconv_iconv_boundary]:-not-run}"
+	local full_no_iconv_rc="${case_rc[c_static_consumer_noiconv_build]:-not-run}"
+	local full_with_iconv_rc="${case_rc[c_static_consumer_iconv_build]:-not-run}"
+	local full_pango_oracle_rc="${case_rc[c_static_consumer_noiconv_iconv_boundary]:-not-run}"
 	local gettext_no_iconv_rc="${case_rc[gettext_static_noiconv_build]:-not-run}"
 	local gettext_with_iconv_rc="${case_rc[gettext_static_iconv_build]:-not-run}"
+	local gettext_oracle_rc="${case_rc[gettext_static_noiconv_iconv_boundary]:-not-run}"
 	local v_no_iconv_rc="${case_rc[vglyph_static_noprod_noiconv_build]:-not-run}"
 	local v_with_iconv_rc="${case_rc[vglyph_static_noprod_iconv_build]:-not-run}"
+	local v_raw_oracle_rc="${case_rc[vglyph_static_noprod_noiconv_iconv_boundary]:-not-run}"
+	local v_manual_no_iconv_rc="${case_rc[vglyph_static_manual_noiconv_build]:-not-run}"
+	local v_manual_with_iconv_rc="${case_rc[vglyph_static_manual_iconv_build]:-not-run}"
+	local v_manual_oracle_rc="${case_rc[vglyph_static_manual_noiconv_iconv_boundary]:-not-run}"
 	local v_s2_rc="${case_rc[vglyph_static_prod_no_prod_options_iconv_build]:-not-run}"
 	local v_prod_rc="${case_rc[vglyph_static_prod_iconv_build]:-not-run}"
 	local showcase_noprod_rc="${case_rc[showcase_static_noprod_iconv_build]:-not-run}"
@@ -548,20 +612,36 @@ write_summary() {
 		echo '### Discriminating results'
 		echo
 		echo "- Toolchain: MSYS2 UCRT64 $cc; this is not a CLANG64-shell result."
-		echo "- Pango/pkgconf C static: without an explicit final \`-liconv\`=$no_iconv_rc; with it=$with_iconv_rc."
-		echo "- Direct gettext C static: without \`-liconv\`=$gettext_no_iconv_rc; with it=$gettext_with_iconv_rc."
-		echo "- vglyph static non-prod: without iconv=$v_no_iconv_rc; with iconv=$v_with_iconv_rc."
-		echo "- vglyph static with iconv: non-prod=$v_with_iconv_rc; S2 prod/no-prod-options=$v_s2_rc; S3 $s3_label=$v_prod_rc."
-		echo "- showcase static with iconv: non-prod=$showcase_noprod_rc; S2 prod/no-prod-options=$showcase_s2_rc; S3 $s3_label=$showcase_prod_rc."
+		echo "- Raw Pango/pkgconf C-driver static: without an explicit final \`-liconv\`=$no_iconv_rc; with it=$with_iconv_rc; exclusive-iconv classification=$raw_pango_oracle_rc."
+		echo "- Completed Pango static consumer (GLib static macros + $cxx driver): without \`-liconv\`=$full_no_iconv_rc; with final \`-liconv\`=$full_with_iconv_rc; exclusive-iconv classification=$full_pango_oracle_rc."
+		echo "- Direct gettext C static: without \`-liconv\`=$gettext_no_iconv_rc; with it=$gettext_with_iconv_rc; exclusive-iconv classification=$gettext_oracle_rc."
+		echo "- Reporter-faithful vglyph static non-prod: without iconv=$v_no_iconv_rc; with iconv=$v_with_iconv_rc; exclusive-iconv classification=$v_raw_oracle_rc."
+		echo "- Manual-closure vglyph isolation (GLib static macros + \`-lstdc++\`): without iconv=$v_manual_no_iconv_rc; with final iconv=$v_manual_with_iconv_rc; exclusive-iconv classification=$v_manual_oracle_rc."
+		echo "- Reporter-flag vglyph with iconv: non-prod=$v_with_iconv_rc; S2 prod/no-prod-options=$v_s2_rc; S3 $s3_label=$v_prod_rc."
+		echo "- Reporter-flag showcase with iconv: non-prod=$showcase_noprod_rc; S2 prod/no-prod-options=$showcase_s2_rc; S3 $s3_label=$showcase_prod_rc."
 		echo '- Showcase is a public, link-only surrogate for the private application; its GUI executable is not launched on the runner.'
 		echo '- Static PE architecture/subsystem/imports, retained C/RSP files, link order, and S2/S3 flags are required gates.'
-		echo '- Targeted Event Viewer and textual WER metadata are under `windows/`; memory dumps are never uploaded.'
+		echo "- Targeted Event Viewer and textual WER metadata are under \`windows/\`; memory dumps are never uploaded."
 		echo "- Required command failures: $required_failures."
 		echo
-		if [ "$no_iconv_rc" != 0 ] && [ "$no_iconv_rc" != not-run ] && [ "$with_iconv_rc" = 0 ]; then
-			echo '- The Pango/pkgconf C oracle isolates a missing static iconv edge in external metadata/order.'
+		if [ "$raw_pango_oracle_rc" = 0 ] && [ "$no_iconv_rc" != 0 ] && [ "$no_iconv_rc" != not-run ]; then
+			echo '- The raw Pango/pkgconf C-driver pair isolates a missing static iconv edge in external metadata/order.'
 		elif [ "$no_iconv_rc" = 0 ]; then
-			echo '- The current MSYS2 package snapshot links the C oracle without an explicit final `-liconv`; inspect pkgconf and symbol artifacts for package drift.'
+			echo "- The current MSYS2 package snapshot links the raw C oracle without an explicit final \`-liconv\`; inspect pkgconf and symbol artifacts for package drift."
+		elif [ "$raw_pango_oracle_rc" != 0 ] && [ "$raw_pango_oracle_rc" != not-run ]; then
+			echo '- The raw Pango/pkgconf failure is not exclusively iconv; inspect static GLib import macros and C++ runtime edges separately.'
+		fi
+		if [ "$full_pango_oracle_rc" = 0 ] && [ "$full_no_iconv_rc" != 0 ] && [ "$full_no_iconv_rc" != not-run ]; then
+			echo '- After supplying the documented static-consumer macros and C++ driver, the completed Pango control isolates the final iconv edge.'
+		fi
+		if [ "$gettext_oracle_rc" = 0 ] && [ "$gettext_no_iconv_rc" != 0 ] && [ "$gettext_no_iconv_rc" != not-run ]; then
+			echo '- The direct gettext pair independently isolates the libintl-to-iconv static edge without Pango, GLib, HarfBuzz, or Graphite.'
+		fi
+		if [ "$v_raw_oracle_rc" != 0 ] && [ "$v_raw_oracle_rc" != not-run ]; then
+			echo '- The reporter-faithful V pair is not exclusively an iconv boundary; it remains the end-to-end resolution gate, not the manual closure control.'
+		fi
+		if [ "$v_manual_oracle_rc" = 0 ] && [ "$v_manual_no_iconv_rc" != 0 ] && [ "$v_manual_no_iconv_rc" != not-run ]; then
+			echo '- The separately labelled V manual-closure pair isolates iconv after supplying static GLib/C++ consumer requirements; it is not the reporter command.'
 		fi
 		if [ "$v_with_iconv_rc" = 0 ] && [ "$v_prod_rc" != 0 ] && [ "$v_prod_rc" != not-run ]; then
 			echo "- vglyph passes without \`-prod\` and fails in S3; isolate $cc $s3_label before changing dependency metadata."
@@ -584,6 +664,8 @@ read -r -a pango_cflags <<< "$(pkgconf --cflags pangoft2 2>/dev/null || true)"
 read -r -a pango_dynamic_libs <<< "$(pkgconf --libs pangoft2 2>/dev/null || true)"
 read -r -a pango_static_libs <<< "$(pkgconf --static --libs pangoft2 2>/dev/null || true)"
 
+run_command vglyph_module_check check yes "$v_exe" -check "$probe_v"
+
 c_dynamic_exe="$bin_dir/c_dynamic.exe"
 run_command c_dynamic_build build yes "$cc" "${pango_cflags[@]}" "$probe_c" -o "$c_dynamic_exe" "${pango_dynamic_libs[@]}"
 c_dynamic_build_rc="$last_rc"
@@ -595,22 +677,38 @@ run_command c_static_noiconv_build build no "$cc" -static "${pango_cflags[@]}" "
 c_static_noiconv_build_rc="$last_rc"
 inspect_pe c_static_noiconv "$c_static_noiconv_exe"
 check_static_pe c_static_noiconv yes "$c_static_noiconv_exe" "$c_static_noiconv_build_rc" console
-verify_expected_iconv_outcome c_static_noiconv
 run_built_executable c_static_noiconv yes "$c_static_noiconv_exe" "$c_static_noiconv_build_rc"
 
 c_static_iconv_exe="$bin_dir/c_static_iconv.exe"
-run_command c_static_iconv_build build yes "$cc" -static "${pango_cflags[@]}" "$probe_c" -o "$c_static_iconv_exe" "${pango_static_libs[@]}" -liconv
+run_command c_static_iconv_build build no "$cc" -static "${pango_cflags[@]}" "$probe_c" -o "$c_static_iconv_exe" "${pango_static_libs[@]}" -liconv
 c_static_iconv_build_rc="$last_rc"
 inspect_pe c_static_iconv "$c_static_iconv_exe"
 check_static_pe c_static_iconv yes "$c_static_iconv_exe" "$c_static_iconv_build_rc" console
+verify_expected_iconv_outcome c_static_noiconv c_static_iconv no
 run_built_executable c_static_iconv yes "$c_static_iconv_exe" "$c_static_iconv_build_rc"
+
+c_static_consumer_noiconv_exe="$bin_dir/c_static_consumer_noiconv.exe"
+pango_static_obj="$generated_dir/pango_probe_static.o"
+run_command c_static_probe_compile build yes "$cc" -c -DGLIB_STATIC_COMPILATION -DGOBJECT_STATIC_COMPILATION "${pango_cflags[@]}" "$probe_c" -o "$pango_static_obj"
+run_command c_static_consumer_noiconv_build build no "$cxx" -static "$pango_static_obj" -o "$c_static_consumer_noiconv_exe" "${pango_static_libs[@]}" -lstdc++
+c_static_consumer_noiconv_build_rc="$last_rc"
+inspect_pe c_static_consumer_noiconv "$c_static_consumer_noiconv_exe"
+check_static_pe c_static_consumer_noiconv yes "$c_static_consumer_noiconv_exe" "$c_static_consumer_noiconv_build_rc" console
+run_built_executable c_static_consumer_noiconv yes "$c_static_consumer_noiconv_exe" "$c_static_consumer_noiconv_build_rc"
+
+c_static_consumer_iconv_exe="$bin_dir/c_static_consumer_iconv.exe"
+run_command c_static_consumer_iconv_build build yes "$cxx" -static "$pango_static_obj" -o "$c_static_consumer_iconv_exe" "${pango_static_libs[@]}" -lstdc++ -liconv
+c_static_consumer_iconv_build_rc="$last_rc"
+inspect_pe c_static_consumer_iconv "$c_static_consumer_iconv_exe"
+check_static_pe c_static_consumer_iconv yes "$c_static_consumer_iconv_exe" "$c_static_consumer_iconv_build_rc" console
+verify_expected_iconv_outcome c_static_consumer_noiconv c_static_consumer_iconv yes
+run_built_executable c_static_consumer_iconv yes "$c_static_consumer_iconv_exe" "$c_static_consumer_iconv_build_rc"
 
 gettext_static_noiconv_exe="$bin_dir/gettext_static_noiconv.exe"
 run_command gettext_static_noiconv_build build no "$cc" -static "$gettext_probe_c" -o "$gettext_static_noiconv_exe" -lintl
 gettext_static_noiconv_build_rc="$last_rc"
 inspect_pe gettext_static_noiconv "$gettext_static_noiconv_exe"
 check_static_pe gettext_static_noiconv yes "$gettext_static_noiconv_exe" "$gettext_static_noiconv_build_rc" console
-verify_expected_iconv_outcome gettext_static_noiconv
 run_built_executable gettext_static_noiconv yes "$gettext_static_noiconv_exe" "$gettext_static_noiconv_build_rc"
 
 gettext_static_iconv_exe="$bin_dir/gettext_static_iconv.exe"
@@ -618,6 +716,7 @@ run_command gettext_static_iconv_build build yes "$cc" -static "$gettext_probe_c
 gettext_static_iconv_build_rc="$last_rc"
 inspect_pe gettext_static_iconv "$gettext_static_iconv_exe"
 check_static_pe gettext_static_iconv yes "$gettext_static_iconv_exe" "$gettext_static_iconv_build_rc" console
+verify_expected_iconv_outcome gettext_static_noiconv gettext_static_iconv yes
 run_built_executable gettext_static_iconv yes "$gettext_static_iconv_exe" "$gettext_static_iconv_build_rc"
 
 run_v_build vglyph_dynamic_noprod yes "$probe_v" -cflags '-Wno-error -Wno-incompatible-pointer-types'
@@ -630,12 +729,21 @@ run_built_executable vglyph_dynamic_prod yes "$bin_dir/vglyph_dynamic_prod.exe" 
 
 run_v_build vglyph_static_noprod_noiconv no "$probe_v" -cflags '-static -Wno-error -Wno-incompatible-pointer-types'
 vglyph_static_noprod_noiconv_build_rc="$last_rc"
-verify_expected_iconv_outcome vglyph_static_noprod_noiconv
 run_built_executable vglyph_static_noprod_noiconv yes "$bin_dir/vglyph_static_noprod_noiconv.exe" "$vglyph_static_noprod_noiconv_build_rc"
 
 run_v_build vglyph_static_noprod_iconv yes "$probe_v" -cflags '-static -Wno-error -Wno-incompatible-pointer-types' -ldflags '-liconv'
 vglyph_static_noprod_iconv_build_rc="$last_rc"
+verify_expected_iconv_outcome vglyph_static_noprod_noiconv vglyph_static_noprod_iconv yes
 run_built_executable vglyph_static_noprod_iconv yes "$bin_dir/vglyph_static_noprod_iconv.exe" "$vglyph_static_noprod_iconv_build_rc"
+
+run_v_build vglyph_static_manual_noiconv no "$probe_v" -cflags '-static -DGOBJECT_STATIC_COMPILATION -DGLIB_STATIC_COMPILATION -Wno-error -Wno-incompatible-pointer-types' -ldflags '-lstdc++'
+vglyph_static_manual_noiconv_build_rc="$last_rc"
+run_built_executable vglyph_static_manual_noiconv yes "$bin_dir/vglyph_static_manual_noiconv.exe" "$vglyph_static_manual_noiconv_build_rc"
+
+run_v_build vglyph_static_manual_iconv yes "$probe_v" -cflags '-static -DGOBJECT_STATIC_COMPILATION -DGLIB_STATIC_COMPILATION -Wno-error -Wno-incompatible-pointer-types' -ldflags '-lstdc++ -liconv'
+vglyph_static_manual_iconv_build_rc="$last_rc"
+verify_expected_iconv_outcome vglyph_static_manual_noiconv vglyph_static_manual_iconv yes
+run_built_executable vglyph_static_manual_iconv yes "$bin_dir/vglyph_static_manual_iconv.exe" "$vglyph_static_manual_iconv_build_rc"
 
 run_v_build vglyph_static_prod_no_prod_options_iconv yes "$probe_v" -prod -no-prod-options -cflags '-static -Wno-error -Wno-incompatible-pointer-types' -ldflags '-liconv'
 vglyph_static_prod_no_prod_options_iconv_build_rc="$last_rc"
