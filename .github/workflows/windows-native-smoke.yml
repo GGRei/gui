@@ -20,6 +20,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
@@ -664,10 +667,33 @@ jobs:
           }
         }
 
+  resolve-ucrt64-revisions:
+    name: Resolve UCRT64 diagnostic revisions
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.prewarm_deps_only && inputs.run_mingw }}
+    outputs:
+      v_revision: ${{ steps.revisions.outputs.v_revision }}
+      vglyph_revision: ${{ steps.revisions.outputs.vglyph_revision }}
+    steps:
+    - name: Resolve shared upstream revisions
+      id: revisions
+      shell: bash
+      run: |
+        set -euo pipefail
+        v_revision="$(git ls-remote https://github.com/vlang/v HEAD | awk '{ print $1 }')"
+        vglyph_revision="$(git ls-remote https://github.com/vlang/vglyph HEAD | awk '{ print $1 }')"
+        [[ "$v_revision" =~ ^[0-9a-f]{40}$ ]]
+        [[ "$vglyph_revision" =~ ^[0-9a-f]{40}$ ]]
+        echo "V revision: $v_revision"
+        echo "vglyph revision: $vglyph_revision"
+        echo "v_revision=$v_revision" >> "$GITHUB_OUTPUT"
+        echo "vglyph_revision=$vglyph_revision" >> "$GITHUB_OUTPUT"
+
   mingw:
     name: MSYS2 UCRT64 ${{ matrix.cc }} native smoke
-    runs-on: windows-latest
-    timeout-minutes: 45
+    needs: resolve-ucrt64-revisions
+    runs-on: windows-2025
+    timeout-minutes: 90
     if: ${{ !inputs.prewarm_deps_only && inputs.run_mingw }}
     strategy:
       fail-fast: false
@@ -683,7 +709,7 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        $revision = '${{ needs.resolve-ucrt64-revisions.outputs.v_revision }}'
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore V compiler cache
       id: restore-v-cache
@@ -752,10 +778,7 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
-        if ($LASTEXITCODE -ne 0) {
-          throw "Could not resolve vglyph revision"
-        }
+        $revision = '${{ needs.resolve-ucrt64-revisions.outputs.vglyph_revision }}'
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore V module cache
       uses: actions/cache@v4
@@ -771,8 +794,10 @@ jobs:
       with:
         msystem: UCRT64
         update: true
-        path-type: inherit
+        cache: false
+        path-type: minimal
         install: >-
+          git
           ${{ matrix.compiler_package }}
           mingw-w64-ucrt-x86_64-binutils
           mingw-w64-ucrt-x86_64-pkgconf
@@ -785,6 +810,7 @@ jobs:
       run: |
         set -euo pipefail
         cc='${{ matrix.cc }}'
+        export PATH="$PWD/v:$PATH"
         if [ "$MSYSTEM" != UCRT64 ]; then
           echo "Expected UCRT64, got $MSYSTEM" >&2
           exit 1
@@ -792,9 +818,11 @@ jobs:
         v version
         command -v "$cc"
         command -v pkgconf
+        command -v pkg-config
         "$cc" --version
         pkgconf --version
-        for tool in "$cc" pkgconf ld nm objdump; do
+        pkg-config --version
+        for tool in "$cc" pkgconf pkg-config ld nm objdump; do
           case "$(command -v "$tool")" in
             "$MINGW_PREFIX"/bin/*) ;;
             *)
@@ -838,25 +866,45 @@ jobs:
       run: >-
         bash gui/.github/workflows/issue74/run_ucrt64_static_diagnostics.sh
         '${{ matrix.cc }}' ./v/v.exe gui issue74-artifacts
+    - name: "Upload issue #74 diagnostic artifacts"
+      if: ${{ always() }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: issue74-ucrt64-${{ matrix.cc }}-${{ github.run_attempt }}
+        path: issue74-artifacts/${{ matrix.cc }}
+        if-no-files-found: error
+        retention-days: 90
+    - name: "Enforce issue #74 required diagnostics"
+      if: ${{ always() }}
+      shell: msys2 {0}
+      run: |
+        if [ '${{ steps.issue74.outcome }}' != success ]; then
+          echo "Required issue #74 diagnostics failed for ${{ matrix.cc }}." >&2
+          exit 1
+        fi
     - name: Run Windows setup preflight
       shell: msys2 {0}
       env:
         GUI_WINDOWS_PREFLIGHT_CC: ${{ matrix.cc }}
-      run: v run gui/_windows_preflight.vsh
+      run: |
+        export PATH="$PWD/v:$PATH"
+        v run gui/_windows_preflight.vsh
     - name: Run noninteractive native tests
       if: ${{ matrix.cc == 'gcc' }}
       shell: msys2 {0}
-      run: >
-        v -no-parallel -cc gcc test
-        gui/_native_dialog_test.v
-        gui/_native_print_test.v
-        gui/_native_notification_test.v
-        gui/nativebridge/_bridge_ex_test.v
-        gui/nativebridge/_readback_abi_test.v
+      run: |
+        export PATH="$PWD/v:$PATH"
+        v -no-parallel -cc gcc test \
+          gui/_native_dialog_test.v \
+          gui/_native_print_test.v \
+          gui/_native_notification_test.v \
+          gui/nativebridge/_bridge_ex_test.v \
+          gui/nativebridge/_readback_abi_test.v
     - name: Compile native smoke examples
       if: ${{ matrix.cc == 'gcc' }}
       shell: msys2 {0}
       run: |
+        export PATH="$PWD/v:$PATH"
         v -no-parallel -cc gcc -W -o dialogs_smoke.exe gui/examples/dialogs.v
         v -no-parallel -cc gcc -W -o printing_smoke.exe gui/examples/printing.v
         v -no-parallel -cc gcc -W -o notification_smoke.exe gui/examples/native_notification.v
@@ -882,20 +930,4 @@ jobs:
               exit 1
             fi
           done
-        fi
-    - name: "Upload issue #74 diagnostic artifacts"
-      if: ${{ always() }}
-      uses: actions/upload-artifact@v4
-      with:
-        name: issue74-ucrt64-${{ matrix.cc }}-${{ github.run_attempt }}
-        path: issue74-artifacts/${{ matrix.cc }}
-        if-no-files-found: warn
-        retention-days: 14
-    - name: "Enforce issue #74 required diagnostics"
-      if: ${{ always() }}
-      shell: msys2 {0}
-      run: |
-        if [ '${{ steps.issue74.outcome }}' != success ]; then
-          echo "Required issue #74 diagnostics failed for ${{ matrix.cc }}." >&2
-          exit 1
         fi
