@@ -25,7 +25,7 @@ concurrency:
 
 env:
   V_REPOSITORY: https://github.com/GGRei/v.git
-  V_REVISION: 0ead19a4d5e7d3b506356fecef959ce816b313a5
+  V_REVISION: a44ee097d1fea4a537d432d825eb53bec47b0068
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
   VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
   VMODULES: ${{ github.workspace }}\.vmodules
@@ -1869,7 +1869,7 @@ jobs:
           source_name="${source##*/}"
           local -a diagnostic_flags=()
           case "$generation:$source_name" in
-            v3:verify_final_link.v) diagnostic_flags=(-d issue74_v3_process_wait_trace) ;;
+            v3:verify_final_link.v) diagnostic_flags=(-d issue74_v3_process_wait_trace -keepc) ;;
             v1:verify_final_link.v|v1:verify_results.v|v3:verify_results.v) ;;
             *) echo "Unexpected helper generation/source: $generation/$source_name" >&2; exit 1 ;;
           esac
@@ -1883,12 +1883,177 @@ jobs:
               -o "$(cygpath -w "$output")" "$(cygpath -w "$source")"
           test -f "$output" && test ! -L "$output" && test -x "$output"
         }
+        inspect_v3_wait_c() {
+          local helper_state="$1"
+          local vtmp="$helper_state/vtmp"
+          local vtmp_real c_file c_real c_base c_size c_lines
+          local begin_text='ISSUE74_PROCESS_WAIT close.process.begin'
+          local end_text='ISSUE74_PROCESS_WAIT close.process.end'
+          local begin_id end_id begin_decl end_decl begin_usage end_usage distance
+          local marker_file occurrence_file line_file interval_file context_file interval_size
+          local -a candidates marker_lines identifier_matches occurrence_lines usage_lines
+          shopt -s nullglob
+          candidates=("$vtmp"/verify-final-link.exe.*.tmp.c)
+          shopt -u nullglob
+          [ "${#candidates[@]}" -eq 1 ] || {
+            echo "Expected exactly one tokenized V3 final-link C file, found ${#candidates[@]}" >&2
+            return 1
+          }
+          c_file="${candidates[0]}"
+          if [ ! -f "$c_file" ] || [ -L "$c_file" ]; then
+            echo "Kept V3 C is not a regular non-link file: $c_file" >&2
+            return 1
+          fi
+          vtmp_real="$(readlink -f -- "$vtmp")"
+          c_real="$(readlink -f -- "$c_file")"
+          if [ -z "$vtmp_real" ] || [ -z "$c_real" ]; then
+            echo 'Kept V3 C canonicalization returned an empty path' >&2
+            return 1
+          fi
+          case "$c_real" in
+            "$vtmp_real"/*) ;;
+            *) echo "Kept V3 C escaped its VTMP: $c_real" >&2; return 1 ;;
+          esac
+          c_base="${c_real##*/}"
+          [[ "$c_base" =~ ^verify-final-link\.exe\.[0-9]+\.[0-9]+\.[0-9]+\.tmp\.c$ ]] || {
+            echo "Unexpected kept V3 C basename: $c_base" >&2
+            return 1
+          }
+          c_size="$(wc -c < "$c_real")"
+          c_lines="$(wc -l < "$c_real")"
+          [[ "$c_size" =~ ^[0-9]+$ && "$c_lines" =~ ^[0-9]+$ ]]
+          if [ "$c_size" -lt 1 ] || [ "$c_size" -gt 33554432 ]; then
+            echo "Kept V3 C size is out of bounds: $c_size" >&2
+            return 1
+          fi
+          if [ "$c_lines" -lt 1 ] || [ "$c_lines" -gt 500000 ]; then
+            echo "Kept V3 C line count is out of bounds: $c_lines" >&2
+            return 1
+          fi
+          resolve_marker_usage() {
+            local text="$1" label="$2"
+            local declaration_line declaration_text identifier remainder occurrence_count
+            marker_file="$helper_state/$label-marker.txt"
+            occurrence_file="$helper_state/$label-occurrences.txt"
+            line_file="$helper_state/$label-lines.txt"
+            if [ -e "$marker_file" ] || [ -e "$occurrence_file" ] || [ -e "$line_file" ]; then
+              echo "Fresh marker evidence paths already exist for $label" >&2
+              return 1
+            fi
+            if ! awk -v marker="$text" 'index($0, marker) { print NR ":" $0 }' "$c_real" > "$marker_file"; then
+              echo "Failed to resolve $label marker declaration" >&2
+              return 1
+            fi
+            mapfile -t marker_lines < "$marker_file"
+            [ "${#marker_lines[@]}" -eq 1 ] || {
+              echo "Expected one $label marker declaration, found ${#marker_lines[@]}" >&2
+              return 1
+            }
+            declaration_line="${marker_lines[0]%%:*}"
+            declaration_text="${marker_lines[0]#*:}"
+            identifier_matches=()
+            remainder="$declaration_text"
+            while [[ "$remainder" =~ (_str_[0-9]+) ]]; do
+              identifier_matches+=("${BASH_REMATCH[1]}")
+              remainder="${remainder#*${BASH_REMATCH[1]}}"
+            done
+            [ "${#identifier_matches[@]}" -eq 1 ] || {
+              echo "Expected one interned identifier for $label, found ${#identifier_matches[@]}" >&2
+              return 1
+            }
+            identifier="${identifier_matches[0]}"
+            if ! grep -ow -- "$identifier" "$c_real" > "$occurrence_file"; then
+              echo "Interned identifier missing for $label" >&2
+              return 1
+            fi
+            occurrence_count="$(wc -l < "$occurrence_file")"
+            [ "$occurrence_count" -eq 2 ] || {
+              echo "Expected two global occurrences of $label identifier, found $occurrence_count" >&2
+              return 1
+            }
+            if ! grep -nw -- "$identifier" "$c_real" > "$line_file"; then
+              echo "Interned identifier line lookup failed for $label" >&2
+              return 1
+            fi
+            mapfile -t occurrence_lines < "$line_file"
+            [ "${#occurrence_lines[@]}" -eq 2 ] || {
+              echo "Expected two distinct lines for $label identifier, found ${#occurrence_lines[@]}" >&2
+              return 1
+            }
+            usage_lines=()
+            for occurrence_line in "${occurrence_lines[@]}"; do
+              if [ "${occurrence_line%%:*}" -ne "$declaration_line" ]; then
+                usage_lines+=("${occurrence_line%%:*}")
+              fi
+            done
+            [ "${#usage_lines[@]}" -eq 1 ] || {
+              echo "Expected one non-declaration use for $label, found ${#usage_lines[@]}" >&2
+              return 1
+            }
+            printf '%s\t%s\t%s\n' "$identifier" "$declaration_line" "${usage_lines[0]}"
+          }
+          IFS=$'\t' read -r begin_id begin_decl begin_usage < <(resolve_marker_usage "$begin_text" begin)
+          IFS=$'\t' read -r end_id end_decl end_usage < <(resolve_marker_usage "$end_text" end)
+          if [ -z "$begin_id" ] || [ -z "$end_id" ] || [ "$begin_id" = "$end_id" ]; then
+            echo 'Interned begin/end identifiers are empty or identical' >&2
+            return 1
+          fi
+          [ "$begin_usage" -lt "$end_usage" ]
+          distance=$((end_usage - begin_usage))
+          if [ "$distance" -lt 1 ] || [ "$distance" -gt 16 ]; then
+            echo "Generated begin/end usage distance is out of bounds: $distance" >&2
+            return 1
+          fi
+          interval_file="$helper_state/wait-call-interval.txt"
+          test ! -e "$interval_file"
+          if ! awk -v first="$begin_usage" -v last="$end_usage" '
+            NR > first && NR < last && /os__close_valid_handle[[:space:]]*\(/ { print NR ":" $0 }
+          ' "$c_real" > "$interval_file"; then
+            echo 'Failed to inspect generated close-process interval' >&2
+            return 1
+          fi
+          mapfile -t occurrence_lines < "$interval_file"
+          [ "${#occurrence_lines[@]}" -eq 1 ] || {
+            echo "Expected one generated process-handle close call, found ${#occurrence_lines[@]}" >&2
+            return 1
+          }
+          [[ "${occurrence_lines[0]}" == *proc_info* && "${occurrence_lines[0]}" == *h_process* ]] || {
+            echo 'Generated close call does not target proc_info.h_process' >&2
+            return 1
+          }
+          if [ ! -f "$interval_file" ] || [ -L "$interval_file" ]; then
+            echo 'Generated close-process interval evidence is not a regular non-link file' >&2
+            return 1
+          fi
+          interval_size="$(wc -c < "$interval_file")"
+          if [[ ! "$interval_size" =~ ^[0-9]+$ ]] || [ "$interval_size" -lt 1 ] || [ "$interval_size" -gt 25600 ]; then
+            echo "Generated close-process interval evidence size is out of bounds: $interval_size" >&2
+            return 1
+          fi
+          echo 'ISSUE74_V3_WAIT_C_INTERVAL_BEGIN'
+          cat -- "$interval_file"
+          echo 'ISSUE74_V3_WAIT_C_INTERVAL_END'
+          for label in begin end; do
+            if [ "$label" = begin ]; then usage="$begin_usage"; else usage="$end_usage"; fi
+            context_file="$helper_state/$label-context.txt"
+            test ! -e "$context_file"
+            if ! awk -v center="$usage" 'NR >= center - 4 && NR <= center + 4 { printf "%d:%s\n", NR, substr($0, 1, 1000) }' "$c_real" > "$context_file"; then
+              echo "Failed to extract bounded $label context" >&2
+              return 1
+            fi
+            [ "$(wc -l < "$context_file")" -le 9 ]
+            [ "$(wc -c < "$context_file")" -le 9216 ]
+            echo "ISSUE74_V3_WAIT_C_CONTEXT $label path=$c_real usage=$usage"
+            cat "$context_file"
+          done
+        }
         final_link_v1="$helper_root/v1/verify-final-link.exe"
         final_link_v3="$helper_root/v3/verify-final-link.exe"
         results_v1="$helper_root/v1/verify-results.exe"
         results_v3="$helper_root/v3/verify-results.exe"
         compile_helper v1 "$final_link_source" "$final_link_v1" "$helper_root/v1/final-link-state"
         compile_helper v3 "$final_link_source" "$final_link_v3" "$helper_root/v3/final-link-state"
+        inspect_v3_wait_c "$helper_root/v3/final-link-state"
         compile_helper v1 "$results_source" "$results_v1" "$helper_root/v1/results-state"
         compile_helper v3 "$results_source" "$results_v3" "$helper_root/v3/results-state"
         "$final_link_v1" --selftest
