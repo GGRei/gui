@@ -32,13 +32,23 @@ probe_c="$script_dir/pango_probe.c"
 gettext_probe_c="$script_dir/gettext_probe.c"
 probe_v="$script_dir/vglyph_probe.v"
 windows_collector="$script_dir/collect_windows_diagnostics.ps1"
-final_link_parser="$script_dir/verify_final_link.py"
 showcase_v="$gui_dir/examples/showcase.v"
 
+: "${ISSUE74_VERIFY_FINAL_LINK_V1:?ISSUE74_VERIFY_FINAL_LINK_V1 is required}"
+: "${ISSUE74_VERIFY_FINAL_LINK_V3:?ISSUE74_VERIFY_FINAL_LINK_V3 is required}"
+final_link_parser_v1="$(cygpath -u "$ISSUE74_VERIFY_FINAL_LINK_V1")"
+final_link_parser_v3="$(cygpath -u "$ISSUE74_VERIFY_FINAL_LINK_V3")"
+
 : "${MINGW_PREFIX:?MINGW_PREFIX is not set; run this script from an MSYS2 WinGNU shell}"
-for required_path in "$v_exe" "$probe_c" "$gettext_probe_c" "$probe_v" "$windows_collector" "$final_link_parser" "$showcase_v"; do
+for required_path in "$v_exe" "$probe_c" "$gettext_probe_c" "$probe_v" "$windows_collector" "$showcase_v"; do
 	if [ ! -f "$required_path" ]; then
 		echo "required diagnostic input not found: $required_path" >&2
+		exit 2
+	fi
+done
+for parser in "$final_link_parser_v1" "$final_link_parser_v3"; do
+	if [ ! -f "$parser" ] || [ -L "$parser" ] || [ ! -x "$parser" ]; then
+		echo "required final-link parser not found or unsafe: $parser" >&2
 		exit 2
 	fi
 done
@@ -46,7 +56,7 @@ objdump_tool="${ISSUE74_OBJDUMP:-objdump}"
 case "$objdump_tool" in objdump|llvm-objdump) ;; *) echo "unsupported object inspection tool: $objdump_tool" >&2; exit 2 ;; esac
 nm_tool="${ISSUE74_NM:-nm}"
 case "$nm_tool" in nm|llvm-nm) ;; *) echo "unsupported symbol inspection tool: $nm_tool" >&2; exit 2 ;; esac
-for required_tool in timeout cygpath powershell.exe "$nm_tool" "$objdump_tool" python3; do
+for required_tool in timeout cygpath powershell.exe "$nm_tool" "$objdump_tool"; do
 	if ! command -v "$required_tool" >/dev/null 2>&1; then
 		echo "required diagnostic tool not found: $required_tool" >&2
 		exit 2
@@ -59,14 +69,6 @@ for inspection_tool in "$nm_tool" "$objdump_tool"; do
 		*) echo "$inspection_tool escaped $MINGW_PREFIX/bin: $inspection_path" >&2; exit 2 ;;
 	esac
 done
-python_exe="$(command -v python3)"
-python_real="$(realpath "$python_exe")"
-case "$python_exe:$python_real" in
-	/usr/bin/python3:/usr/bin/python*) ;;
-	*) echo "python3 must resolve to MSYS /usr/bin, got $python_exe -> $python_real" >&2; exit 2 ;;
-esac
-"$python_exe" --version
-
 : "${VMODULES:?VMODULES is not set; point it at the Windows-visible V modules directory}"
 vmodules_dir="$(cygpath -u "$VMODULES")"
 vmodules_windows="$(cygpath -w "$vmodules_dir")"
@@ -641,11 +643,52 @@ verify_final_link_contract() {
 	local log="$logs_dir/${name}_build.log"
 	local flat="$logs_dir/${name}_final-link.txt"
 	local expected_output_windows
-	local rc=0
+	local rc=0 rc_v1=0 rc_v3=0 parity_rc=0
+	local report_v1="$flat.v1.tmp" report_v3="$flat.v3.tmp"
+	local stdout_v1="$flat.v1.stdout.tmp" stdout_v3="$flat.v3.stdout.tmp"
+	local stderr_v1="$flat.v1.stderr.tmp" stderr_v3="$flat.v3.stderr.tmp"
 	expected_output_windows="$(cygpath -w "$bin_dir/${output_stem}.exe")" || rc=$?
 	if [ "$rc" -eq 0 ]; then
-		"$python_exe" "$final_link_parser" "$log" "$expected_output_windows" "$generation" "$mode" \
-		"$profile" "$lane" "$cc_windows" "$cxx_windows" "$flat" || rc=$?
+		"$final_link_parser_v1" "$log" "$expected_output_windows" "$generation" "$mode" \
+			"$profile" "$lane" "$cc_windows" "$cxx_windows" "$report_v1" \
+			>"$stdout_v1" 2>"$stderr_v1" || rc_v1=$?
+		"$final_link_parser_v3" "$log" "$expected_output_windows" "$generation" "$mode" \
+			"$profile" "$lane" "$cc_windows" "$cxx_windows" "$report_v3" \
+			>"$stdout_v3" 2>"$stderr_v3" || rc_v3=$?
+		[ "$rc_v1" -eq "$rc_v3" ] || parity_rc=1
+		local -a report_pairs=()
+		if [ -f "$report_v1" ] && [ -f "$report_v3" ]; then
+			report_pairs=("$report_v1" "$report_v3")
+		elif [ -e "$report_v1" ] || [ -L "$report_v1" ] || [ -e "$report_v3" ] || [ -L "$report_v3" ]; then
+			parity_rc=1
+		elif [ "$rc_v1" -eq 0 ]; then
+			echo 'final-link parsers succeeded without reports' >&2
+			parity_rc=1
+		fi
+		"$final_link_parser_v1" compare-files "$stdout_v1" "$stdout_v3" "$stderr_v1" "$stderr_v3" \
+			"${report_pairs[@]}" || parity_rc=1
+		"$final_link_parser_v3" compare-files "$stdout_v1" "$stdout_v3" "$stderr_v1" "$stderr_v3" \
+			"${report_pairs[@]}" || parity_rc=1
+		cat "$stdout_v1"
+		cat "$stderr_v1" >&2
+		if [ "$parity_rc" -eq 0 ] && [ "${#report_pairs[@]}" -eq 2 ]; then
+			if mv "$report_v1" "$flat"; then
+				rm -f "$report_v3"
+				if [ ! -f "$flat" ] || [ -L "$flat" ]; then
+					echo 'published final-link report is not a regular non-link file' >&2
+					parity_rc=1
+				fi
+			else
+				echo 'failed to publish final-link report' >&2
+				parity_rc=1
+			fi
+		fi
+		rm -f "$stdout_v1" "$stdout_v3" "$stderr_v1" "$stderr_v3" "$report_v1" "$report_v3"
+		if [ "$parity_rc" -ne 0 ]; then
+			rc=1
+		else
+			rc="$rc_v1"
+		fi
 	fi
 	record_result "${name}_final_link" oracle yes "$rc"
 }

@@ -25,7 +25,7 @@ concurrency:
 
 env:
   V_REPOSITORY: https://github.com/GGRei/v.git
-  V_REVISION: 7280d51a401423434e09e24823c0f3f6a548dc9b
+  V_REVISION: 90923b38bb812393370fbadcf0ae4122268e142b
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
   VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
   VMODULES: ${{ github.workspace }}\.vmodules
@@ -913,6 +913,39 @@ jobs:
             throw "$module escaped canonical vcpkg prefix: $prefix"
           }
         }
+        if ($null -ne $env:CFLAGS -and $env:CFLAGS.Length -ne 0) {
+          throw 'ambient CFLAGS must be empty before exporting the canonical GLib config include'
+        }
+        $glibLibDirLines = @(& $pkgConfig.Source --variable=libdir glib-2.0)
+        if ($LASTEXITCODE -ne 0 -or $glibLibDirLines.Count -ne 1) {
+          throw 'pkg-config --variable=libdir glib-2.0 failed or returned multiple lines'
+        }
+        $glibLibDirRaw = [string]$glibLibDirLines[0]
+        if ([string]::IsNullOrWhiteSpace($glibLibDirRaw)) {
+          throw 'pkg-config --variable=libdir glib-2.0 failed or returned an empty value'
+        }
+        if ($glibLibDirRaw -match '[\r\n]') {
+          throw 'GLib libdir contains a forbidden line break'
+        }
+        $canonicalLibDir = [IO.Path]::GetFullPath((Join-Path $tripletRoot 'lib')).TrimEnd('\')
+        $glibLibDir = [IO.Path]::GetFullPath($glibLibDirRaw.Trim()).TrimEnd('\')
+        if (-not [string]::Equals($glibLibDir, $canonicalLibDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+          throw "GLib libdir escaped canonical vcpkg lib directory: $glibLibDir"
+        }
+        $glibConfigIncludeDir = [IO.Path]::GetFullPath((Join-Path $glibLibDir 'glib-2.0\include')).TrimEnd('\')
+        $glibConfigIncludeItem = Get-Item -LiteralPath $glibConfigIncludeDir -Force -ErrorAction Stop
+        if (-not $glibConfigIncludeItem.PSIsContainer -or
+            ($glibConfigIncludeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+          throw "invalid GLib config include directory: $glibConfigIncludeDir"
+        }
+        $glibConfigHeader = Get-Item -LiteralPath (Join-Path $glibConfigIncludeDir 'glibconfig.h') -Force -ErrorAction Stop
+        if ($glibConfigHeader.PSIsContainer -or
+            ($glibConfigHeader.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+          throw "invalid GLib config header: $($glibConfigHeader.FullName)"
+        }
+        $glibConfigCflags = '-I"{0}"' -f $glibConfigIncludeDir
+        $env:CFLAGS = $glibConfigCflags
+        "CFLAGS=$glibConfigCflags" | Add-Content -Path $env:GITHUB_ENV
         $opensslLibs = @(& $pkgConfig.Source --libs openssl) -join ' '
         if ($LASTEXITCODE -ne 0) {
           throw 'pkg-config --libs openssl failed'
@@ -1215,7 +1248,6 @@ jobs:
           ${{ matrix.object_package }}
           ${{ matrix.lld_package }}
           ${{ matrix.dependency_prefix }}-pkgconf
-          python
           ${{ matrix.dependency_prefix }}-pango
           ${{ matrix.dependency_prefix }}-freetype
           ${{ matrix.dependency_prefix }}-gettext-runtime
@@ -1364,6 +1396,45 @@ jobs:
             -cc "$cc_windows" -c++ "$cxx_windows" \
             -o "$(cygpath -w "$state/canary.exe")" "$(cygpath -w "$state/canary.v")"
         test "$("$state/canary.exe")" = v3-gui-ok
+        helper_root="$state/helpers"
+        mkdir -p "$helper_root/v1" "$helper_root/v3"
+        final_link_source="$PWD/gui/.github/workflows/issue74/verify_final_link.v"
+        results_source="$PWD/gui/.github/workflows/issue74/verify_results.v"
+        test -f "$final_link_source" && test ! -L "$final_link_source"
+        test -f "$results_source" && test ! -L "$results_source"
+        compile_helper() {
+          local generation="$1" source="$2" output="$3" helper_state="$4"
+          rm -rf "$helper_state"
+          mkdir -p "$helper_state/vmodules" "$helper_state/vcache" "$helper_state/v3cache" "$helper_state/vtmp"
+          local -a compiler=("./v/v.exe" -old-compiler)
+          if [ "$generation" = v3 ]; then
+            compiler=("$v3")
+          fi
+          VMODULES="$(cygpath -w "$helper_state/vmodules")" \
+            VCACHE="$(cygpath -w "$helper_state/vcache")" \
+            V3CACHE="$(cygpath -w "$helper_state/v3cache")" \
+            VTMP="$(cygpath -w "$helper_state/vtmp")" \
+            "${compiler[@]}" -gc none -no-parallel -path "$vlib_path" \
+              -cc "$cc_windows" -c++ "$cxx_windows" -no-retry-compilation \
+              -o "$(cygpath -w "$output")" "$(cygpath -w "$source")"
+          test -f "$output" && test ! -L "$output" && test -x "$output"
+        }
+        final_link_v1="$helper_root/v1/verify-final-link.exe"
+        final_link_v3="$helper_root/v3/verify-final-link.exe"
+        results_v1="$helper_root/v1/verify-results.exe"
+        results_v3="$helper_root/v3/verify-results.exe"
+        compile_helper v1 "$final_link_source" "$final_link_v1" "$helper_root/v1/final-link-state"
+        compile_helper v3 "$final_link_source" "$final_link_v3" "$helper_root/v3/final-link-state"
+        compile_helper v1 "$results_source" "$results_v1" "$helper_root/v1/results-state"
+        compile_helper v3 "$results_source" "$results_v3" "$helper_root/v3/results-state"
+        "$final_link_v1" --selftest
+        "$final_link_v3" --selftest
+        "$results_v1" --self-test
+        "$results_v3" --self-test
+        echo "ISSUE74_VERIFY_FINAL_LINK_V1=$(cygpath -w "$final_link_v1")" >> "$GITHUB_ENV"
+        echo "ISSUE74_VERIFY_FINAL_LINK_V3=$(cygpath -w "$final_link_v3")" >> "$GITHUB_ENV"
+        echo "ISSUE74_VERIFY_RESULTS_V1=$(cygpath -w "$results_v1")" >> "$GITHUB_ENV"
+        echo "ISSUE74_VERIFY_RESULTS_V3=$(cygpath -w "$results_v3")" >> "$GITHUB_ENV"
         echo "V3_GNU_STANDALONE=$(cygpath -w "$v3")" >> "$GITHUB_ENV"
     - name: Save standalone V3 cache
       if: ${{ steps.restore-v3.outputs.cache-hit != 'true' }}
@@ -1391,10 +1462,13 @@ jobs:
         set -euo pipefail
         root="issue74-artifacts/${{ matrix.cc }}"
         test -d "$root" && test ! -L "$root"
-        python_exe="$(command -v python3)"
-        python_real="$(realpath "$python_exe")"
-        case "$python_exe:$python_real" in /usr/bin/python3:/usr/bin/python*) ;; *) exit 1 ;; esac
-        "$python_exe" --version
+        final_link_v1="$(cygpath -u "${ISSUE74_VERIFY_FINAL_LINK_V1:?}")"
+        final_link_v3="$(cygpath -u "${ISSUE74_VERIFY_FINAL_LINK_V3:?}")"
+        results_v1="$(cygpath -u "${ISSUE74_VERIFY_RESULTS_V1:?}")"
+        results_v3="$(cygpath -u "${ISSUE74_VERIFY_RESULTS_V3:?}")"
+        for helper in "$final_link_v1" "$final_link_v3" "$results_v1" "$results_v3"; do
+          test -f "$helper" && test ! -L "$helper" && test -x "$helper"
+        done
         validate_wer_leaf() {
           local leaf="$1"
           local suffix
@@ -1461,9 +1535,40 @@ jobs:
         # Reject unsafe inputs before invoking any evidence parser.
         scan_artifacts "$manifest_tmp"
         evidence_rc=0
-        contract_rc=0
-        "$python_exe" gui/.github/workflows/issue74/verify_results.py \
-          "$root/results.tsv" '${{ matrix.cc }}' "$root/results-contract.txt" || contract_rc=$?
+        contract_rc_v1=0
+        contract_rc_v3=0
+        contract_v1="$root/results-contract.v1.tmp"
+        contract_v3="$root/results-contract.v3.tmp"
+        stdout_v1="$root/results-contract.v1.stdout.tmp"
+        stdout_v3="$root/results-contract.v3.stdout.tmp"
+        stderr_v1="$root/results-contract.v1.stderr.tmp"
+        stderr_v3="$root/results-contract.v3.stderr.tmp"
+        "$results_v1" "$root/results.tsv" '${{ matrix.cc }}' "$contract_v1" \
+          >"$stdout_v1" 2>"$stderr_v1" || contract_rc_v1=$?
+        "$results_v3" "$root/results.tsv" '${{ matrix.cc }}' "$contract_v3" \
+          >"$stdout_v3" 2>"$stderr_v3" || contract_rc_v3=$?
+        contract_rc="$contract_rc_v1"
+        contract_parity=0
+        [ "$contract_rc_v1" -eq "$contract_rc_v3" ] || contract_parity=1
+        report_pairs=()
+        if [ -f "$contract_v1" ] && [ -f "$contract_v3" ]; then
+          report_pairs=("$contract_v1" "$contract_v3")
+        elif [ -e "$contract_v1" ] || [ -L "$contract_v1" ] || [ -e "$contract_v3" ] || [ -L "$contract_v3" ]; then
+          contract_parity=1
+        fi
+        "$final_link_v1" compare-files "$stdout_v1" "$stdout_v3" "$stderr_v1" "$stderr_v3" \
+          "${report_pairs[@]}" || contract_parity=1
+        "$final_link_v3" compare-files "$stdout_v1" "$stdout_v3" "$stderr_v1" "$stderr_v3" \
+          "${report_pairs[@]}" || contract_parity=1
+        cat "$stdout_v1"
+        cat "$stderr_v1" >&2
+        if [ "$contract_parity" -eq 0 ] && [ "${#report_pairs[@]}" -eq 2 ]; then
+          mv "$contract_v1" "$root/results-contract.txt"
+          rm -f "$contract_v3"
+        else
+          contract_rc=1
+        fi
+        rm -f "$stdout_v1" "$stdout_v3" "$stderr_v1" "$stderr_v3" "$contract_v1" "$contract_v3"
         if [ "$contract_rc" -ne 0 ]; then
           evidence_rc=1
         fi
