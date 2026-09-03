@@ -25,7 +25,7 @@ concurrency:
 
 env:
   V_REPOSITORY: https://github.com/GGRei/v.git
-  V_REVISION: 42579b55a6e78bd684099b6508528e61fa8063d6
+  V_REVISION: 0ead19a4d5e7d3b506356fecef959ce816b313a5
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
   VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
   VMODULES: ${{ github.workspace }}\.vmodules
@@ -1866,12 +1866,20 @@ jobs:
           if [ "$generation" = v3 ]; then
             compiler=("$v3")
           fi
+          source_name="${source##*/}"
+          local -a diagnostic_flags=()
+          case "$generation:$source_name" in
+            v3:verify_final_link.v) diagnostic_flags=(-d issue74_v3_process_wait_trace) ;;
+            v1:verify_final_link.v|v1:verify_results.v|v3:verify_results.v) ;;
+            *) echo "Unexpected helper generation/source: $generation/$source_name" >&2; exit 1 ;;
+          esac
           VMODULES="$(cygpath -w "$helper_state/vmodules")" \
             VCACHE="$(cygpath -w "$helper_state/vcache")" \
             V3CACHE="$(cygpath -w "$helper_state/v3cache")" \
             VTMP="$(cygpath -w "$helper_state/vtmp")" \
             "${compiler[@]}" -gc none -no-parallel -path "$vlib_path" \
               -cc "$cc_windows" -c++ "$cxx_windows" -no-retry-compilation \
+              "${diagnostic_flags[@]}" \
               -o "$(cygpath -w "$output")" "$(cygpath -w "$source")"
           test -f "$output" && test ! -L "$output" && test -x "$output"
         }
