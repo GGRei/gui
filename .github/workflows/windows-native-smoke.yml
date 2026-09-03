@@ -1029,13 +1029,199 @@ jobs:
         GUI_WINDOWS_PREFLIGHT_CC: clang
       run: v run gui/_windows_preflight.vsh
     - name: Run noninteractive native tests
-      run: >
-        v -no-parallel -cc clang test
-        gui/_native_dialog_test.v
-        gui/_native_print_test.v
-        gui/_native_notification_test.v
-        gui/nativebridge/_bridge_ex_test.v
-        gui/nativebridge/_readback_abi_test.v
+      env:
+        ISSUE74_DIAG_NATIVE: '1'
+      run: |
+        $ErrorActionPreference = 'Stop'
+        if ([string]::IsNullOrEmpty($env:ISSUE74_DIAG_NATIVE)) {
+          v -no-parallel -cc clang test gui/_native_dialog_test.v gui/_native_print_test.v gui/_native_notification_test.v gui/nativebridge/_bridge_ex_test.v gui/nativebridge/_readback_abi_test.v
+          exit $LASTEXITCODE
+        }
+        if ($env:ISSUE74_DIAG_NATIVE -cne '1') {
+          throw "Unsupported ISSUE74_DIAG_NATIVE value: $env:ISSUE74_DIAG_NATIVE"
+        }
+        $PSNativeCommandUseErrorActionPreference = $false
+        function Format-RcHex([int]$Value) {
+          try {
+            $bits = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int32]$Value), 0)
+            return ('0x{0:X8}' -f $bits)
+          } catch {
+            return 'unavailable'
+          }
+        }
+        & v -no-parallel -cc clang test gui/_native_dialog_test.v gui/_native_print_test.v gui/_native_notification_test.v gui/nativebridge/_bridge_ex_test.v gui/nativebridge/_readback_abi_test.v
+        $primaryRc = $LASTEXITCODE
+        Write-Host "Primary native batch rc=$primaryRc hex=$(Format-RcHex $primaryRc)"
+        if ($primaryRc -eq 0) {
+          exit 0
+        }
+        $llvmReady = $false
+        $clangItem = $null
+        $readobjItem = $null
+
+        $owners = @(
+          @{ File = 'gui/nativebridge/_bridge_ex_test.v'; Function = 'test_bridge_result_ex_from_legacy_ok' },
+          @{ File = 'gui/nativebridge/_bridge_ex_test.v'; Function = 'test_bridge_result_ex_from_legacy_cancel' },
+          @{ File = 'gui/nativebridge/_bridge_ex_test.v'; Function = 'test_bridge_result_ex_from_legacy_error' },
+          @{ File = 'gui/nativebridge/_bridge_ex_test.v'; Function = 'test_bridge_dialog_unsupported_result_ex' },
+          @{ File = 'gui/nativebridge/_bridge_ex_test.v'; Function = 'test_bridge_print_unsupported_result' },
+          @{ File = 'gui/nativebridge/_bridge_ex_test.v'; Function = 'test_bridge_alert_unsupported_result' },
+          @{ File = 'gui/nativebridge/_bridge_ex_test.v'; Function = 'test_bridge_notification_status_from_int' },
+          @{ File = 'gui/nativebridge/_bridge_ex_test.v'; Function = 'test_bridge_notification_unsupported_result' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_buffer_free_accepts_c_allocated_buffer' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_buffer_free_accepts_null' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_metal_rejects_invalid_native_args' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_metal_rejects_nil_native_handles' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_metal_reports_unsupported_off_macos' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_gl_rejects_invalid_native_dimensions' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_gl_reports_unsupported_off_linux' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_d3d11_rejects_invalid_native_dimensions' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_d3d11_rejects_nil_native_handles' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_d3d11_c_rejects_invalid_native_args' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_d3d11_warp_roundtrip' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_d3d11_rejects_unsupported_format' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_d3d11_rejects_msaa' },
+          @{ File = 'gui/nativebridge/_readback_abi_test.v'; Function = 'test_readback_d3d11_reports_unsupported_off_windows' }
+        )
+        $llvmAttempted = $false
+        $ownerIndex = 0
+        foreach ($owner in $owners) {
+          $ownerIndex++
+          $functionName = [string]$owner.Function
+          $fileName = [string]$owner.File
+          try {
+            $ownerTemp = Join-Path $env:RUNNER_TEMP ("issue74-host-clang-{0:D2}-{1}" -f $ownerIndex, $functionName)
+            if (Test-Path -LiteralPath $ownerTemp) {
+              throw "Per-owner VTMP already exists: $ownerTemp"
+            }
+            New-Item -ItemType Directory -Path $ownerTemp | Out-Null
+            $ownerTempItem = Get-Item -LiteralPath $ownerTemp -Force
+            if (-not $ownerTempItem.PSIsContainer -or
+                ($ownerTempItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+              throw "Per-owner VTMP is not a real directory: $ownerTemp"
+            }
+            $ownerExe = Join-Path $ownerTempItem.FullName 'owner.exe'
+            if (Test-Path -LiteralPath $ownerExe) {
+              throw "Per-owner diagnostic PE already exists: $ownerExe"
+            }
+            $env:VTMP = $ownerTempItem.FullName
+            $diagStdout = Join-Path $ownerTemp 'diagnostic.stdout.txt'
+            $diagStderr = Join-Path $ownerTemp 'diagnostic.stderr.txt'
+            & v -no-parallel -cc clang -no-retry-compilation -showcc -keepc -o $ownerExe -test-runner normal -run-only $functionName $fileName 1> $diagStdout 2> $diagStderr
+            $diagnosticRc = $LASTEXITCODE
+            Get-Content -LiteralPath $diagStdout -Raw -ErrorAction SilentlyContinue | Write-Host
+            Get-Content -LiteralPath $diagStderr -Raw -ErrorAction SilentlyContinue | Write-Host
+            Write-Host "Diagnostic owner ${fileName}::${functionName} rc=$diagnosticRc hex=$(Format-RcHex $diagnosticRc)"
+            if ($diagnosticRc -eq 0) {
+              continue
+            }
+
+            if (-not $llvmAttempted) {
+              $llvmAttempted = $true
+              try {
+                $clangCommand = Get-Command clang.exe -CommandType Application -ErrorAction Stop
+                $readobjCommand = Get-Command llvm-readobj.exe -CommandType Application -ErrorAction Stop
+                $clangItem = Get-Item -LiteralPath $clangCommand.Source -Force
+                $readobjItem = Get-Item -LiteralPath $readobjCommand.Source -Force
+                foreach ($toolItem in @($clangItem, $readobjItem)) {
+                  if (-not ($toolItem -is [IO.FileInfo]) -or
+                      ($toolItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                    throw "LLVM diagnostic tool is not a real file: $($toolItem.FullName)"
+                  }
+                }
+                $llvmBin = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'LLVM\bin')).TrimEnd('\')
+                foreach ($toolItem in @($clangItem, $readobjItem)) {
+                  $toolParent = [IO.Path]::GetFullPath($toolItem.DirectoryName).TrimEnd('\')
+                  if (-not [string]::Equals($toolParent, $llvmBin, [StringComparison]::OrdinalIgnoreCase)) {
+                    throw "LLVM diagnostic tool escaped canonical LLVM bin: $($toolItem.FullName)"
+                  }
+                }
+                $clangVersion = @(& $clangItem.FullName --version 2>&1)
+                $clangVersionRc = $LASTEXITCODE
+                $readobjVersion = @(& $readobjItem.FullName --version 2>&1)
+                $readobjVersionRc = $LASTEXITCODE
+                $clangText = $clangVersion -join "`n"
+                $readobjText = $readobjVersion -join "`n"
+                if ($clangVersionRc -ne 0 -or $readobjVersionRc -ne 0 -or
+                    $clangText -notmatch '(?m)^clang version ([0-9]+)\.' -or
+                    $readobjText -notmatch '(?m)^\s*LLVM version ([0-9]+)\.') {
+                  throw 'LLVM diagnostic version provenance failed'
+                }
+                $clangMajor = [int]([regex]::Match($clangText, '(?m)^clang version ([0-9]+)\.').Groups[1].Value)
+                $readobjMajor = [int]([regex]::Match($readobjText, '(?m)^\s*LLVM version ([0-9]+)\.').Groups[1].Value)
+                if ($clangMajor -ne $readobjMajor -or $readobjText -notmatch '(?im)^\s*Registered Targets:') {
+                  throw 'LLVM diagnostic tools are not version-aligned or target-aware'
+                }
+                $clangTarget = @(& $clangItem.FullName -dumpmachine 2>&1)
+                $clangTargetRc = $LASTEXITCODE
+                if ($clangTargetRc -ne 0 -or ($clangTarget -join '').Trim() -notmatch '^(x86_64|amd64)-.*windows') {
+                  throw "Unexpected host-Clang target: $(($clangTarget -join '').Trim())"
+                }
+                Write-Host "LLVM diagnostic clang: $($clangItem.FullName) major=$clangMajor target=$(($clangTarget -join '').Trim())"
+                Write-Host "LLVM diagnostic readobj: $($readobjItem.FullName) major=$readobjMajor"
+                $llvmReady = $true
+              } catch {
+                Write-Warning "LLVM diagnostic provenance unavailable: $($_.Exception.Message)"
+              }
+            }
+
+            try {
+              $generated = @(Get-ChildItem -LiteralPath $ownerTemp -Recurse -File -Force)
+              foreach ($generatedItem in $generated) {
+                if (($generatedItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                  throw "Diagnostic generated path is a reparse point: $($generatedItem.FullName)"
+                }
+              }
+              $cFiles = @($generated | Where-Object { $_.Extension -ceq '.c' })
+              $unexpectedPeFiles = @($generated | Where-Object {
+                $_.Extension -ceq '.exe' -and
+                -not [string]::Equals($_.FullName, $ownerExe, [StringComparison]::OrdinalIgnoreCase)
+              })
+              if ($unexpectedPeFiles.Count -ne 0) {
+                throw "Diagnostic collection found an unexpected PE path: $($unexpectedPeFiles.FullName -join '; ')"
+              }
+              $peFiles = @()
+              if (Test-Path -LiteralPath $ownerExe) {
+                $ownerExeItem = Get-Item -LiteralPath $ownerExe -Force
+                if (-not ($ownerExeItem -is [IO.FileInfo]) -or
+                    ($ownerExeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $ownerExeItem.Length -le 0 -or $ownerExeItem.Length -gt 67108864) {
+                  throw "Per-owner diagnostic PE is not a bounded real file: $ownerExe"
+                }
+                $peFiles = @($ownerExeItem)
+              }
+              Write-Host "Generated C count=$($cFiles.Count)"
+              Write-Host "Generated PE count=$($peFiles.Count)"
+              if ($cFiles.Count -eq 0) {
+                Write-Warning "Diagnostic collection found no generated C file for function '$functionName' in '$fileName'"
+              }
+              if ($peFiles.Count -eq 0) {
+                Write-Warning "Diagnostic collection found no generated PE file for function '$functionName' in '$fileName'"
+              }
+              foreach ($cFile in $cFiles) {
+                Write-Host "Generated C path: $($cFile.FullName)"
+              }
+              foreach ($peFile in $peFiles) {
+                Write-Host "Generated PE path: $($peFile.FullName)"
+                if (-not $llvmReady) {
+                  Write-Warning "PE inspection unavailable for $($peFile.FullName); primary failure retained"
+                  continue
+                }
+                $peOutput = @(& $readobjItem.FullName --file-headers --coff-imports $peFile.FullName 2>&1)
+                $peRc = $LASTEXITCODE
+                $peOutput | Select-String -Pattern '^\s*(Machine|Subsystem|Name):' | ForEach-Object { Write-Host $_.Line }
+                if ($peRc -ne 0) {
+                  Write-Warning "llvm-readobj failed for $($peFile.FullName): rc=$peRc"
+                }
+              }
+            } catch {
+              Write-Warning "Diagnostic collection failed for ${fileName}::${functionName}: $($_.Exception.Message)"
+            }
+          } catch {
+            Write-Warning "Diagnostic instrumentation failed for ${fileName}::${functionName}: $($_.Exception.Message)"
+          }
+        }
+        exit $primaryRc
     - name: Compile native smoke examples
       run: |
         v -no-parallel -cc clang -W -o dialogs_smoke.exe gui/examples/dialogs.v

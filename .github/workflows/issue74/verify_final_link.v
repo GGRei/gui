@@ -620,7 +620,7 @@ fn verify_content(content string, config VerifyConfig) !Verification {
 			for after in response_index + 1 .. tokens.len {
 				expanded << tokens[after]
 			}
-			tokens = expanded
+			tokens = expanded.clone()
 		} else if command.has_response {
 			return error('response-file log block has no matching command reference')
 		}
