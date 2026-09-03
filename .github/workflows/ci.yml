@@ -38,7 +38,7 @@ concurrency:
 
 env:
   V_REPOSITORY: https://github.com/GGRei/v.git
-  V_REVISION: 90923b38bb812393370fbadcf0ae4122268e142b
+  V_REVISION: c07d154ef2dbcf8ff1b0d01f592ebf2468f8ed7f
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
   VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
 
