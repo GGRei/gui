@@ -1126,7 +1126,7 @@ jobs:
               throw "LLVM version or target mismatch: clang=$clangMajor readobj=$readobjMajor target=$targetText"
             }
             Write-Host "ISSUE74_LLVM clang=$($clangItem.FullName) readobj=$($readobjItem.FullName) major=$clangMajor target=$targetText"
-            return @{ Clang = $clangItem; Readobj = $readobjItem }
+            return @{ Clang = $clangItem; ClangMajor = $clangMajor; Readobj = $readobjItem }
           } catch {
             Write-Warning "LLVM diagnostic provenance unavailable: $($_.Exception.Message)"
             return $null
@@ -1410,6 +1410,83 @@ jobs:
                 [void](Write-BoundedDiagnostic $lldb.Stderr "$($generation.Name)-$($probe.Name)-lldb-stderr")
               } catch {
                 Write-Warning "ISSUE74_LLDB generation=$($generation.Name) probe=$($probe.Name) warning=$($_.Exception.Message)"
+              }
+            }
+          }
+        }
+        if ($null -ne $checkoutItem) {
+          foreach ($generation in $generations) {
+            foreach ($probe in @($probes | Where-Object { $_.Name -in @('empty', 'selected') })) {
+              $observation = $observations["$($generation.Name)-$($probe.Name)"]
+              if ($null -eq $observation -or $observation.Hex -cne '0xC0000409') { continue }
+              try {
+                $asanTemp = Join-Path $env:RUNNER_TEMP "issue74-host-clang-$($generation.Name)-$($probe.Name)-asan"
+                if (Test-Path -LiteralPath $asanTemp) { throw "Fresh ASan VTMP already exists: $asanTemp" }
+                New-Item -ItemType Directory -Path $asanTemp | Out-Null
+                $asanTempItem = Get-Item -LiteralPath $asanTemp -Force
+                if (-not $asanTempItem.PSIsContainer -or ($asanTempItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'ASan VTMP is not real' }
+                $asanExe = Join-Path $asanTempItem.FullName 'asan.exe'
+                $asanCompileOut = Join-Path $asanTempItem.FullName 'compile.stdout.txt'
+                $asanCompileErr = Join-Path $asanTempItem.FullName 'compile.stderr.txt'
+                $env:VTMP = $asanTempItem.FullName
+                $asanCompilerArgs = @($generation.Args)
+                & v @asanCompilerArgs -no-parallel -cc clang -no-retry-compilation -showcc -keepc -g -skip-running -o $asanExe -cflags '-fsanitize=address' -cflags '-fno-omit-frame-pointer' -test-runner dump -run-only $probe.Function run $probe.File 1> $asanCompileOut 2> $asanCompileErr
+                $asanCompileRc = $LASTEXITCODE
+                Write-Host "ISSUE74_ASAN_COMPILE generation=$($generation.Name) probe=$($probe.Name) rc=$asanCompileRc hex=$(Format-RcHex $asanCompileRc)"
+                [void](Write-BoundedDiagnostic $asanCompileOut "$($generation.Name)-$($probe.Name)-asan-compile-stdout")
+                [void](Write-BoundedDiagnostic $asanCompileErr "$($generation.Name)-$($probe.Name)-asan-compile-stderr")
+                if ($asanCompileRc -ne 0) { throw "ASan compile failed: rc=$asanCompileRc" }
+                $asanExeItem = Get-Item -LiteralPath $asanExe -Force -ErrorAction Stop
+                if (-not ($asanExeItem -is [IO.FileInfo]) -or ($asanExeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $asanExeItem.Length -le 0 -or $asanExeItem.Length -gt 67108864) { throw 'ASan PE is not a bounded real file' }
+                $asanTools = Get-LlvmDiagnosticTools
+                if ($null -eq $asanTools) { throw 'ASan PE inspection tools unavailable' }
+                $imports = Invoke-BoundedProcess -FilePath $asanTools.Readobj.FullName -ArgumentList ([string[]]@('--coff-imports', $asanExeItem.FullName)) -WorkingDirectory $checkoutItem.FullName -Prefix (Join-Path $asanTempItem.FullName 'readobj')
+                $importLines = @()
+                $importLines += @(Write-BoundedDiagnostic $imports.Stdout "$($generation.Name)-$($probe.Name)-asan-readobj-stdout")
+                $importLines += @(Write-BoundedDiagnostic $imports.Stderr "$($generation.Name)-$($probe.Name)-asan-readobj-stderr")
+                if ($imports.Rc -ne 0) { throw 'ASan PE import inspection failed' }
+                $asanDlls = @($importLines | ForEach-Object { [regex]::Match($_.Trim(), '^Name: (clang_rt\.asan[^\\/:]*\.dll)$') } | Where-Object { $_.Success } | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+                if ($asanDlls.Count -ne 1) { throw "ASan runtime DLL cardinality mismatch: $($asanDlls.Count)" }
+                $resource = Invoke-BoundedProcess -FilePath $asanTools.Clang.FullName -ArgumentList ([string[]]@('-print-resource-dir')) -WorkingDirectory $checkoutItem.FullName -Prefix (Join-Path $asanTempItem.FullName 'resource-dir')
+                $resourceLines = @()
+                $resourceLines += @(Write-BoundedDiagnostic $resource.Stdout "$($generation.Name)-$($probe.Name)-asan-resource-stdout")
+                $resourceLines += @(Write-BoundedDiagnostic $resource.Stderr "$($generation.Name)-$($probe.Name)-asan-resource-stderr")
+                if ($resource.Rc -ne 0 -or $resourceLines.Count -ne 1) { throw 'Clang resource-dir provenance failed' }
+                $resourceItem = Get-Item -LiteralPath $resourceLines[0].Trim() -Force -ErrorAction Stop
+                $llvmRoot = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'LLVM')).TrimEnd('\')
+                if (-not $resourceItem.PSIsContainer -or ($resourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or -not [IO.Path]::GetFullPath($resourceItem.FullName).StartsWith($llvmRoot + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Clang resource-dir escaped LLVM root' }
+                $asanDllItem = Get-Item -LiteralPath (Join-Path $resourceItem.FullName "lib\windows\$($asanDlls[0])") -Force -ErrorAction Stop
+                if (-not ($asanDllItem -is [IO.FileInfo]) -or ($asanDllItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or $asanDllItem.Length -le 0 -or $asanDllItem.Length -gt 67108864) { throw 'ASan runtime DLL is not a bounded real file' }
+                $symbolizerItem = Get-Item -LiteralPath (Join-Path $llvmRoot 'bin\llvm-symbolizer.exe') -Force -ErrorAction Stop
+                if (-not ($symbolizerItem -is [IO.FileInfo]) -or ($symbolizerItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'ASan symbolizer is not a real file' }
+                $symbolizerVersion = Invoke-BoundedProcess -FilePath $symbolizerItem.FullName -ArgumentList ([string[]]@('--version')) -WorkingDirectory $checkoutItem.FullName -Prefix (Join-Path $asanTempItem.FullName 'symbolizer-version')
+                $symbolizerLines = @()
+                $symbolizerLines += @(Write-BoundedDiagnostic $symbolizerVersion.Stdout "$($generation.Name)-$($probe.Name)-symbolizer-version-stdout")
+                $symbolizerLines += @(Write-BoundedDiagnostic $symbolizerVersion.Stderr "$($generation.Name)-$($probe.Name)-symbolizer-version-stderr")
+                $symbolizerMatches = @($symbolizerLines | ForEach-Object { [regex]::Match($_.Trim(), '^LLVM version ([0-9]+)\.') } | Where-Object { $_.Success })
+                if ($symbolizerVersion.Rc -ne 0 -or $symbolizerMatches.Count -ne 1) { throw 'ASan symbolizer version provenance failed' }
+                $symbolizerMajor = [int]$symbolizerMatches[0].Groups[1].Value
+                if ($symbolizerMajor -ne [int]$asanTools.ClangMajor) { throw 'ASan clang/symbolizer major mismatch' }
+                $oldPath = $env:PATH
+                $hadAsanOptions = Test-Path Env:ASAN_OPTIONS
+                $hadSymbolizerPath = Test-Path Env:ASAN_SYMBOLIZER_PATH
+                $oldAsanOptions = [Environment]::GetEnvironmentVariable('ASAN_OPTIONS', 'Process')
+                $oldSymbolizerPath = [Environment]::GetEnvironmentVariable('ASAN_SYMBOLIZER_PATH', 'Process')
+                try {
+                  $env:PATH = "$($asanDllItem.DirectoryName);$oldPath"
+                  $env:ASAN_OPTIONS = 'abort_on_error=1:halt_on_error=1:symbolize=1:detect_leaks=0'
+                  $env:ASAN_SYMBOLIZER_PATH = $symbolizerItem.FullName
+                  $asanRun = Invoke-BoundedProcess -FilePath $asanExeItem.FullName -ArgumentList ([string[]]@()) -WorkingDirectory $checkoutItem.FullName -Prefix (Join-Path $asanTempItem.FullName 'run')
+                  Write-Host "ISSUE74_ASAN_RUN generation=$($generation.Name) probe=$($probe.Name) rc=$($asanRun.Rc) hex=$($asanRun.Hex) runtime=$($asanDllItem.Name)"
+                  [void](Write-BoundedDiagnostic $asanRun.Stdout "$($generation.Name)-$($probe.Name)-asan-run-stdout")
+                  [void](Write-BoundedDiagnostic $asanRun.Stderr "$($generation.Name)-$($probe.Name)-asan-run-stderr")
+                } finally {
+                  $env:PATH = $oldPath
+                  if (-not $hadAsanOptions) { Remove-Item Env:ASAN_OPTIONS -ErrorAction SilentlyContinue } else { $env:ASAN_OPTIONS = $oldAsanOptions }
+                  if (-not $hadSymbolizerPath) { Remove-Item Env:ASAN_SYMBOLIZER_PATH -ErrorAction SilentlyContinue } else { $env:ASAN_SYMBOLIZER_PATH = $oldSymbolizerPath }
+                }
+              } catch {
+                Write-Warning "ISSUE74_ASAN generation=$($generation.Name) probe=$($probe.Name) warning=$($_.Exception.Message)"
               }
             }
           }

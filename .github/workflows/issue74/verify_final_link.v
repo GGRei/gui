@@ -853,6 +853,7 @@ fn config_for_test(generation string, mode string, profile string, lane string, 
 }
 
 fn run_compare_files_child(arguments []string) !CompareChildResult {
+	eprintln('ISSUE74_SELFTEST compare.child.executable.begin')
 	executable := os.executable()
 	metadata := os.lstat(executable) or {
 		return error('selftest executable metadata read failed')
@@ -862,20 +863,26 @@ fn run_compare_files_child(arguments []string) !CompareChildResult {
 	}
 	mut child_arguments := ['compare-files']
 	child_arguments << arguments
+	eprintln('ISSUE74_SELFTEST compare.child.new-process.begin')
 	mut process := os.new_process(executable)
 	process.set_args(child_arguments)
 	process.set_redirect_stdio()
+	eprintln('ISSUE74_SELFTEST compare.child.run.begin')
 	process.run()
+	eprintln('ISSUE74_SELFTEST compare.child.wait.begin')
 	process.wait()
+	eprintln('ISSUE74_SELFTEST compare.child.slurp.begin')
 	stdout := process.stdout_slurp()
 	stderr := process.stderr_slurp()
 	exit_code := process.code
 	status := process.status
 	process_error := process.err
+	eprintln('ISSUE74_SELFTEST compare.child.close.begin')
 	process.close()
 	if status != .exited || exit_code < 0 || process_error != '' {
 		return error('selftest compare-files child process failed to execute')
 	}
+	eprintln('ISSUE74_SELFTEST compare.child.return.begin')
 	return CompareChildResult{
 		exit_code: exit_code
 		stdout: stdout
@@ -929,6 +936,7 @@ fn cleanup_selftest_directory(directory string, files []string, directories []st
 }
 
 fn run_compare_files_selftest() ! {
+	eprintln('ISSUE74_SELFTEST compare.setup.begin')
 	runner_temp := os.getenv('RUNNER_TEMP')
 	if runner_temp == '' {
 		return error('selftest requires RUNNER_TEMP')
@@ -972,6 +980,7 @@ fn run_compare_files_selftest() ! {
 		return error('selftest directory is not a real directory')
 	}
 
+	eprintln('ISSUE74_SELFTEST compare.fixtures.begin')
 	selftest_write_file(empty_left, [])!
 	selftest_write_file(empty_right, [])!
 	selftest_write_file(binary_left, [u8(0), u8(0xff), u8(1)])!
@@ -987,6 +996,7 @@ fn run_compare_files_selftest() ! {
 		return error('selftest symlink fixture is not a link')
 	}
 
+	eprintln('ISSUE74_SELFTEST compare.children.begin')
 	expect_compare_files_child([empty_left, empty_right], 0, '')!
 	expect_compare_files_child([binary_left, binary_right], 0, '')!
 	expect_compare_files_child([empty_left, empty_right, binary_left, binary_right], 0, '')!
@@ -1009,12 +1019,17 @@ fn run_compare_files_selftest() ! {
 	expect_compare_files_child([over_cap, empty_left], 2,
 		'compare-files input 1 exceeds 8388608 bytes')!
 
+	eprintln('ISSUE74_SELFTEST compare.cleanup.begin')
 	cleanup_selftest_directory(directory, files, directories)!
 	cleanup_required = false
+	eprintln('ISSUE74_SELFTEST compare.end')
 }
 
 fn run_selftest() ! {
+	eprintln('ISSUE74_SELFTEST normalization.begin')
 	run_cli_normalization_selftest()!
+	eprintln('ISSUE74_SELFTEST normalization.end')
+	eprintln('ISSUE74_SELFTEST scalar.begin')
 	replacement := [u8(0xef), u8(0xbf), u8(0xbd)].bytestr()
 	self_expect(decode_utf8_replace('plain'.bytes()) == 'plain', 'ASCII UTF-8 decoding')!
 	self_expect(decode_utf8_replace([u8(0xc3), u8(0xa9)]) == 'é', 'valid UTF-8 decoding')!
@@ -1044,8 +1059,12 @@ fn run_selftest() ! {
 	self_expect(bytes_equal([u8(0), u8(0xff)], [u8(0), u8(0xff)]), 'binary byte equality')!
 	self_expect(!bytes_equal([u8(0)], [u8(1)]) && !bytes_equal([u8(0)], [u8(0), u8(1)]),
 		'binary byte difference')!
+	eprintln('ISSUE74_SELFTEST scalar.end')
+	eprintln('ISSUE74_SELFTEST compare.begin')
 	run_compare_files_selftest()!
+	eprintln('ISSUE74_SELFTEST compare.return')
 
+	eprintln('ISSUE74_SELFTEST contracts.begin')
 	cc := 'C:\\msys64\\ucrt64\\bin\\gcc.exe'
 	cxx := 'C:\\msys64\\ucrt64\\bin\\g++.exe'
 	output := 'D:\\tmp\\app.exe'
@@ -1170,9 +1189,11 @@ fn run_selftest() ! {
 		'dev', 'ucrt64-gcc', cc, cxx, 'report.txt']
 	bad_path_failed := config_fail(bad_path_arguments, 'non-ASCII or control byte in lexical path')
 	self_expect(bad_path_failed, 'config path domain rejection')!
+	eprintln('ISSUE74_SELFTEST contracts.end')
 }
 
 fn selftest_cli(arguments []string) int {
+	eprintln('ISSUE74_SELFTEST selftest_cli.begin')
 	if arguments.len != 2 {
 		eprintln('usage: verify_final_link --selftest')
 		return 2
