@@ -32,7 +32,7 @@ env:
   VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
   VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
   VCPKG_CACHE_SCHEMA: gui-issue74-v1
-  VCPKG_PACKAGES: freetype,pango
+  VCPKG_PACKAGES: freetype,pango,openssl
   VCPKG_TARGET_TRIPLET: x64-windows
 
 jobs:
@@ -175,7 +175,7 @@ jobs:
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
           windows-vmodules-vglyph-
-    - name: Install pango and freetype
+    - name: Install pango, freetype, and OpenSSL
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -258,6 +258,39 @@ jobs:
         & $pkgConfig.Source --exists freetype2 pango pangoft2
         if ($LASTEXITCODE -ne 0) {
           throw "pkg-config could not resolve freetype2 pango pangoft2"
+        }
+        & $pkgConfig.Source --exists openssl libssl libcrypto
+        if ($LASTEXITCODE -ne 0) {
+          throw "pkg-config could not resolve openssl libssl libcrypto"
+        }
+        $canonicalPkgConfigDir = [IO.Path]::GetFullPath((Join-Path $tripletRoot 'lib\pkgconfig')).TrimEnd('\')
+        $canonicalPrefix = [IO.Path]::GetFullPath($tripletRoot).TrimEnd('\')
+        foreach ($module in @('openssl', 'libssl', 'libcrypto')) {
+          $pcFileDir = (& $pkgConfig.Source --variable=pcfiledir $module).Trim()
+          if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($pcFileDir).TrimEnd('\') -ne $canonicalPkgConfigDir) {
+            throw "$module escaped canonical pkg-config directory: $pcFileDir"
+          }
+          $prefix = (& $pkgConfig.Source --variable=prefix $module).Trim()
+          if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($prefix).TrimEnd('\') -ne $canonicalPrefix) {
+            throw "$module escaped canonical vcpkg prefix: $prefix"
+          }
+        }
+        $opensslLibs = @(& $pkgConfig.Source --libs openssl) -join ' '
+        if ($LASTEXITCODE -ne 0) {
+          throw 'pkg-config --libs openssl failed'
+        }
+        $opensslTokens = @($opensslLibs -split '\s+' | Where-Object { $_ })
+        if (($opensslTokens | Where-Object { $_ -ceq '-llibssl' }).Count -ne 1 -or
+            ($opensslTokens | Where-Object { $_ -ceq '-llibcrypto' }).Count -ne 1 -or
+            ($opensslTokens | Where-Object { $_ -ceq '-lssl' -or $_ -ceq '-lcrypto' }).Count -ne 0) {
+          throw "unexpected OpenSSL linker tokens: $opensslLibs"
+        }
+        foreach ($leaf in @('libssl.lib', 'libcrypto.lib')) {
+          $item = Get-Item -LiteralPath (Join-Path $tripletRoot "lib\$leaf") -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            continue
+          }
+          throw "invalid OpenSSL library leaf: $($item.FullName)"
         }
     - name: Ensure vglyph revision
       shell: pwsh
@@ -438,7 +471,7 @@ jobs:
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
           windows-vmodules-vglyph-
-    - name: Install pango and freetype
+    - name: Install pango, freetype, and OpenSSL
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -521,6 +554,39 @@ jobs:
         & $pkgConfig.Source --exists freetype2 pango pangoft2
         if ($LASTEXITCODE -ne 0) {
           throw "pkg-config could not resolve freetype2 pango pangoft2"
+        }
+        & $pkgConfig.Source --exists openssl libssl libcrypto
+        if ($LASTEXITCODE -ne 0) {
+          throw "pkg-config could not resolve openssl libssl libcrypto"
+        }
+        $canonicalPkgConfigDir = [IO.Path]::GetFullPath((Join-Path $tripletRoot 'lib\pkgconfig')).TrimEnd('\')
+        $canonicalPrefix = [IO.Path]::GetFullPath($tripletRoot).TrimEnd('\')
+        foreach ($module in @('openssl', 'libssl', 'libcrypto')) {
+          $pcFileDir = (& $pkgConfig.Source --variable=pcfiledir $module).Trim()
+          if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($pcFileDir).TrimEnd('\') -ne $canonicalPkgConfigDir) {
+            throw "$module escaped canonical pkg-config directory: $pcFileDir"
+          }
+          $prefix = (& $pkgConfig.Source --variable=prefix $module).Trim()
+          if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($prefix).TrimEnd('\') -ne $canonicalPrefix) {
+            throw "$module escaped canonical vcpkg prefix: $prefix"
+          }
+        }
+        $opensslLibs = @(& $pkgConfig.Source --libs openssl) -join ' '
+        if ($LASTEXITCODE -ne 0) {
+          throw 'pkg-config --libs openssl failed'
+        }
+        $opensslTokens = @($opensslLibs -split '\s+' | Where-Object { $_ })
+        if (($opensslTokens | Where-Object { $_ -ceq '-llibssl' }).Count -ne 1 -or
+            ($opensslTokens | Where-Object { $_ -ceq '-llibcrypto' }).Count -ne 1 -or
+            ($opensslTokens | Where-Object { $_ -ceq '-lssl' -or $_ -ceq '-lcrypto' }).Count -ne 0) {
+          throw "unexpected OpenSSL linker tokens: $opensslLibs"
+        }
+        foreach ($leaf in @('libssl.lib', 'libcrypto.lib')) {
+          $item = Get-Item -LiteralPath (Join-Path $tripletRoot "lib\$leaf") -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            continue
+          }
+          throw "invalid OpenSSL library leaf: $($item.FullName)"
         }
     - name: Ensure vglyph revision
       shell: pwsh
@@ -747,7 +813,7 @@ jobs:
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
           windows-vmodules-vglyph-
-    - name: Install pango and freetype
+    - name: Install pango, freetype, and OpenSSL
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -831,6 +897,39 @@ jobs:
         if ($LASTEXITCODE -ne 0) {
           throw "pkg-config could not resolve freetype2 pango pangoft2"
         }
+        & $pkgConfig.Source --exists openssl libssl libcrypto
+        if ($LASTEXITCODE -ne 0) {
+          throw "pkg-config could not resolve openssl libssl libcrypto"
+        }
+        $canonicalPkgConfigDir = [IO.Path]::GetFullPath((Join-Path $tripletRoot 'lib\pkgconfig')).TrimEnd('\')
+        $canonicalPrefix = [IO.Path]::GetFullPath($tripletRoot).TrimEnd('\')
+        foreach ($module in @('openssl', 'libssl', 'libcrypto')) {
+          $pcFileDir = (& $pkgConfig.Source --variable=pcfiledir $module).Trim()
+          if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($pcFileDir).TrimEnd('\') -ne $canonicalPkgConfigDir) {
+            throw "$module escaped canonical pkg-config directory: $pcFileDir"
+          }
+          $prefix = (& $pkgConfig.Source --variable=prefix $module).Trim()
+          if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($prefix).TrimEnd('\') -ne $canonicalPrefix) {
+            throw "$module escaped canonical vcpkg prefix: $prefix"
+          }
+        }
+        $opensslLibs = @(& $pkgConfig.Source --libs openssl) -join ' '
+        if ($LASTEXITCODE -ne 0) {
+          throw 'pkg-config --libs openssl failed'
+        }
+        $opensslTokens = @($opensslLibs -split '\s+' | Where-Object { $_ })
+        if (($opensslTokens | Where-Object { $_ -ceq '-llibssl' }).Count -ne 1 -or
+            ($opensslTokens | Where-Object { $_ -ceq '-llibcrypto' }).Count -ne 1 -or
+            ($opensslTokens | Where-Object { $_ -ceq '-lssl' -or $_ -ceq '-lcrypto' }).Count -ne 0) {
+          throw "unexpected OpenSSL linker tokens: $opensslLibs"
+        }
+        foreach ($leaf in @('libssl.lib', 'libcrypto.lib')) {
+          $item = Get-Item -LiteralPath (Join-Path $tripletRoot "lib\$leaf") -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+            continue
+          }
+          throw "invalid OpenSSL library leaf: $($item.FullName)"
+        }
     - name: Ensure vglyph revision
       shell: pwsh
       run: |
@@ -870,18 +969,23 @@ jobs:
           throw "Resolved vglyph revision $resolvedRevision does not match expected $expectedRevision"
         }
         Write-Host "Resolved vglyph revision: $resolvedRevision"
-    - name: Install vglyph
+    - name: Validate existing vglyph checkout
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        v install vglyph
-        if ($LASTEXITCODE -ne 0) {
-          throw "v install vglyph failed"
-        }
         $vglyphPath = Join-Path $env:VMODULES 'vglyph'
+        if (-not (Test-Path -LiteralPath $vglyphPath -PathType Container) -or
+            -not (Test-Path -LiteralPath (Join-Path $vglyphPath '.git')) -or
+            -not (Test-Path -LiteralPath (Join-Path $vglyphPath 'v.mod') -PathType Leaf)) {
+          throw "Pinned vglyph checkout is incomplete: $vglyphPath"
+        }
         $resolvedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
-        if ($LASTEXITCODE -ne 0 -or $resolvedRevision -ne '${{ steps.vglyph.outputs.revision }}') {
-          throw "v install changed the pinned vglyph revision to $resolvedRevision"
+        if ($LASTEXITCODE -ne 0 -or $resolvedRevision -ne '${{ env.VGLYPH_REVISION }}') {
+          throw "Pinned vglyph revision mismatch: $resolvedRevision"
+        }
+        $status = @(& git -C $vglyphPath status --porcelain=v1 --untracked-files=all)
+        if ($LASTEXITCODE -ne 0 -or $status.Count -ne 0) {
+          throw "Pinned vglyph checkout is not clean: $($status -join '; ')"
         }
     - name: Checkout gui
       uses: actions/checkout@v4

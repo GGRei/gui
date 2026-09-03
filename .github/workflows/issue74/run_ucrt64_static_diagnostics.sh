@@ -53,7 +53,7 @@ for required_tool in timeout cygpath powershell.exe "$nm_tool" "$objdump_tool" p
 	fi
 done
 for inspection_tool in "$nm_tool" "$objdump_tool"; do
-	inspection_path="$(realpath "$(command -v "$inspection_tool")")"
+	inspection_path="$(realpath "$(command -v "${inspection_tool}.exe")")"
 	case "$inspection_path" in
 		"$MINGW_PREFIX"/bin/*.exe) ;;
 		*) echo "$inspection_tool escaped $MINGW_PREFIX/bin: $inspection_path" >&2; exit 2 ;;

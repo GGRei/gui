@@ -232,7 +232,7 @@ jobs:
       VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
       VCPKG_CACHE_SCHEMA: gui-issue74-v1
-      VCPKG_PACKAGES: freetype,pango
+      VCPKG_PACKAGES: freetype,pango,openssl
       VCPKG_TARGET_TRIPLET: x64-windows
     steps:
       - name: Resolve V revision
@@ -365,7 +365,7 @@ jobs:
         with:
           path: ${{ env.VMODULES }}\vglyph
           key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
-      - name: Install pango and freetype
+      - name: Install pango, freetype, and OpenSSL
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -452,6 +452,39 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "pkg-config could not resolve freetype2 pango pangoft2"
           }
+          & $pkgConfig.Source --exists openssl libssl libcrypto
+          if ($LASTEXITCODE -ne 0) {
+            throw "pkg-config could not resolve openssl libssl libcrypto"
+          }
+          $canonicalPkgConfigDir = [IO.Path]::GetFullPath((Join-Path $tripletRoot 'lib\pkgconfig')).TrimEnd('\')
+          $canonicalPrefix = [IO.Path]::GetFullPath($tripletRoot).TrimEnd('\')
+          foreach ($module in @('openssl', 'libssl', 'libcrypto')) {
+            $pcFileDir = (& $pkgConfig.Source --variable=pcfiledir $module).Trim()
+            if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($pcFileDir).TrimEnd('\') -ne $canonicalPkgConfigDir) {
+              throw "$module escaped canonical pkg-config directory: $pcFileDir"
+            }
+            $prefix = (& $pkgConfig.Source --variable=prefix $module).Trim()
+            if ($LASTEXITCODE -ne 0 -or [IO.Path]::GetFullPath($prefix).TrimEnd('\') -ne $canonicalPrefix) {
+              throw "$module escaped canonical vcpkg prefix: $prefix"
+            }
+          }
+          $opensslLibs = @(& $pkgConfig.Source --libs openssl) -join ' '
+          if ($LASTEXITCODE -ne 0) {
+            throw 'pkg-config --libs openssl failed'
+          }
+          $opensslTokens = @($opensslLibs -split '\s+' | Where-Object { $_ })
+          if (($opensslTokens | Where-Object { $_ -ceq '-llibssl' }).Count -ne 1 -or
+              ($opensslTokens | Where-Object { $_ -ceq '-llibcrypto' }).Count -ne 1 -or
+              ($opensslTokens | Where-Object { $_ -ceq '-lssl' -or $_ -ceq '-lcrypto' }).Count -ne 0) {
+            throw "unexpected OpenSSL linker tokens: $opensslLibs"
+          }
+          foreach ($leaf in @('libssl.lib', 'libcrypto.lib')) {
+            $item = Get-Item -LiteralPath (Join-Path $tripletRoot "lib\$leaf") -Force -ErrorAction Stop
+            if (-not $item.PSIsContainer -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) {
+              continue
+            }
+            throw "invalid OpenSSL library leaf: $($item.FullName)"
+          }
       - name: Ensure vglyph revision
         shell: pwsh
         run: |
@@ -507,6 +540,8 @@ jobs:
 
       - name: Verify Windows V3 stub rejection
         shell: pwsh
+        env:
+          VCOLORS: never
         run: |
           $ErrorActionPreference = 'Stop'
           $source = Join-Path $env:RUNNER_TEMP 'v3-stub.v'
@@ -521,6 +556,10 @@ jobs:
           if (([regex]::Matches(($text | Out-String), [regex]::Escape($expected))).Count -ne 1) {
             throw 'Windows V3 stub diagnostic cardinality mismatch'
           }
+          if (($text | Out-String).Contains([char]27)) {
+            throw 'Windows V3 stub diagnostic unexpectedly contains ESC'
+          }
+          exit 0
       - name: Run Windows setup preflight
         env:
           GUI_WINDOWS_PREFLIGHT_CC: msvc
