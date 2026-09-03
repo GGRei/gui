@@ -25,7 +25,7 @@ concurrency:
 
 env:
   V_REPOSITORY: https://github.com/GGRei/v.git
-  V_REVISION: c07d154ef2dbcf8ff1b0d01f592ebf2468f8ed7f
+  V_REVISION: 42579b55a6e78bd684099b6508528e61fa8063d6
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
   VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
   VMODULES: ${{ github.workspace }}\.vmodules
@@ -1151,7 +1151,7 @@ jobs:
           $processRc = $process.ExitCode
           return @{ Rc = $processRc; Hex = (Format-RcHex $processRc); Stdout = $stdoutPath; Stderr = $stderrPath }
         }
-        function Get-LldbDiagnosticTool() {
+        function Get-LldbDiagnosticTool([string]$WorkingDirectory, [string]$PrefixRoot) {
           try {
             $clangCommand = Get-Command clang.exe -CommandType Application -ErrorAction Stop
             $lldbCommand = Get-Command lldb.exe -CommandType Application -ErrorAction Stop
@@ -1164,11 +1164,39 @@ jobs:
                 throw "LLDB diagnostic tool escaped canonical LLVM bin: $($toolItem.FullName)"
               }
             }
-            $lldbVersion = @(& $lldbItem.FullName --version 2>&1)
-            $lldbVersionRc = $LASTEXITCODE
-            $lldbText = $lldbVersion -join "`n"
-            if ($lldbVersionRc -ne 0 -or $lldbText -notmatch '(?im)^\s*lldb version ([0-9]+)\.') { throw 'LLDB version provenance failed' }
-            $lldbMajor = [int]([regex]::Match($lldbText, '(?im)^\s*lldb version ([0-9]+)\.').Groups[1].Value)
+            Write-Host "ISSUE74_LLDB_PATH path=$($lldbItem.FullName)"
+            $lldbVersionPrefix = Join-Path $PrefixRoot 'lldb-version-flag'
+            $lldbVersion = $null
+            $lldbVersionLines = @()
+            try {
+              $lldbVersion = Invoke-BoundedProcess -FilePath $lldbItem.FullName -ArgumentList ([string[]]@('--version')) -WorkingDirectory $WorkingDirectory -Prefix $lldbVersionPrefix
+              Write-Host "ISSUE74_LLDB_VERSION_FLAG rc=$($lldbVersion.Rc) hex=$($lldbVersion.Hex)"
+              $lldbVersionLines += @(Write-BoundedDiagnostic $lldbVersion.Stdout 'lldb-version-flag-stdout')
+              $lldbVersionLines += @(Write-BoundedDiagnostic $lldbVersion.Stderr 'lldb-version-flag-stderr')
+            } catch {
+              Write-Warning "LLDB --version probe unavailable: $($_.Exception.Message)"
+            }
+            $lldbVersionMatches = @($lldbVersionLines | ForEach-Object {
+              [regex]::Match($_.Trim(), '^lldb version ([0-9]+)(?:\.[0-9]+)+(?:git)?(?: \([^()\r\n]+\))?$')
+            } | Where-Object { $_.Success })
+            if ($null -eq $lldbVersion -or $lldbVersion.Rc -ne 0 -or $lldbVersionMatches.Count -ne 1) {
+              $lldbFallbackPrefix = Join-Path $PrefixRoot 'lldb-version-command'
+              $lldbVersion = $null
+              $lldbVersionLines = @()
+              try {
+                $lldbVersion = Invoke-BoundedProcess -FilePath $lldbItem.FullName -ArgumentList ([string[]]@('--no-lldbinit', '--no-use-colors', '--batch', '-o', 'version', '-o', 'quit')) -WorkingDirectory $WorkingDirectory -Prefix $lldbFallbackPrefix
+                Write-Host "ISSUE74_LLDB_VERSION_COMMAND rc=$($lldbVersion.Rc) hex=$($lldbVersion.Hex)"
+                $lldbVersionLines += @(Write-BoundedDiagnostic $lldbVersion.Stdout 'lldb-version-command-stdout')
+                $lldbVersionLines += @(Write-BoundedDiagnostic $lldbVersion.Stderr 'lldb-version-command-stderr')
+              } catch {
+                Write-Warning "LLDB command version probe unavailable: $($_.Exception.Message)"
+              }
+              $lldbVersionMatches = @($lldbVersionLines | ForEach-Object {
+                [regex]::Match($_.Trim(), '^lldb version ([0-9]+)(?:\.[0-9]+)+(?:git)?(?: \([^()\r\n]+\))?$')
+              } | Where-Object { $_.Success })
+            }
+            if ($null -eq $lldbVersion -or $lldbVersion.Rc -ne 0 -or $lldbVersionMatches.Count -ne 1) { throw 'LLDB version provenance failed' }
+            $lldbMajor = [int]$lldbVersionMatches[0].Groups[1].Value
             $clangVersion = @(& $clangItem.FullName --version 2>&1)
             $clangVersionRc = $LASTEXITCODE
             $clangText = $clangVersion -join "`n"
@@ -1373,7 +1401,7 @@ jobs:
                   Write-Warning "Debug clone did not reproduce C0000409 for $($generation.Name)-$($probe.Name)"
                   continue
                 }
-                $lldbItem = Get-LldbDiagnosticTool
+                $lldbItem = Get-LldbDiagnosticTool -WorkingDirectory $checkoutItem.FullName -PrefixRoot $debugTempItem.FullName
                 if ($null -eq $lldbItem) { continue }
                 $lldbArgs = @('--batch', '-o', 'run', '-o', '"thread backtrace all"', '--', ('"{0}"' -f $debugExeItem.FullName))
                 $lldb = Invoke-BoundedProcess -FilePath $lldbItem.FullName -ArgumentList $lldbArgs -WorkingDirectory $checkoutItem.FullName -Prefix (Join-Path $debugTempItem.FullName 'lldb')
