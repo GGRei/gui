@@ -329,11 +329,12 @@ fn run(arguments []string) ! {
 }
 
 fn main() {
-	arguments := normalize_cli_arguments(os.args) or {
+	runtime_args := arguments()
+	canonical_args := normalize_cli_arguments(runtime_args) or {
 		eprintln(err.msg())
 		exit(1)
 	}
-	run(arguments) or {
+	run(canonical_args) or {
 		eprintln(err.msg())
 		exit(1)
 	}

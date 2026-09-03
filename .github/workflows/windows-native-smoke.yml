@@ -1132,6 +1132,56 @@ jobs:
             return $null
           }
         }
+        function Invoke-BoundedProcess([string]$FilePath, [string[]]$ArgumentList, [string]$WorkingDirectory, [string]$Prefix) {
+          $stdinPath = "$Prefix.stdin.txt"
+          $stdoutPath = "$Prefix.stdout.txt"
+          $stderrPath = "$Prefix.stderr.txt"
+          foreach ($path in @($stdinPath, $stdoutPath, $stderrPath)) {
+            if (Test-Path -LiteralPath $path) { throw "Fresh process stream path already exists: $path" }
+          }
+          [IO.File]::WriteAllBytes($stdinPath, [byte[]]@())
+          $process = Start-Process -FilePath $FilePath -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory -NoNewWindow -PassThru -RedirectStandardInput $stdinPath -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          $completed = $process.WaitForExit(30000)
+          if (-not $completed) {
+            try { $process.Kill($true) } catch { Write-Warning "ISSUE74_PROCESS kill warning: $($_.Exception.Message)" }
+            [void]$process.WaitForExit(5000)
+            return @{ Rc = $null; Hex = 'timeout'; Stdout = $stdoutPath; Stderr = $stderrPath }
+          }
+          $process.WaitForExit()
+          $processRc = $process.ExitCode
+          return @{ Rc = $processRc; Hex = (Format-RcHex $processRc); Stdout = $stdoutPath; Stderr = $stderrPath }
+        }
+        function Get-LldbDiagnosticTool() {
+          try {
+            $clangCommand = Get-Command clang.exe -CommandType Application -ErrorAction Stop
+            $lldbCommand = Get-Command lldb.exe -CommandType Application -ErrorAction Stop
+            $clangItem = Get-Item -LiteralPath $clangCommand.Source -Force
+            $lldbItem = Get-Item -LiteralPath $lldbCommand.Source -Force
+            $llvmBin = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'LLVM\bin')).TrimEnd('\')
+            foreach ($toolItem in @($clangItem, $lldbItem)) {
+              if (-not ($toolItem -is [IO.FileInfo]) -or ($toolItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                  -not [string]::Equals([IO.Path]::GetFullPath($toolItem.DirectoryName).TrimEnd('\'), $llvmBin, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "LLDB diagnostic tool escaped canonical LLVM bin: $($toolItem.FullName)"
+              }
+            }
+            $lldbVersion = @(& $lldbItem.FullName --version 2>&1)
+            $lldbVersionRc = $LASTEXITCODE
+            $lldbText = $lldbVersion -join "`n"
+            if ($lldbVersionRc -ne 0 -or $lldbText -notmatch '(?im)^\s*lldb version ([0-9]+)\.') { throw 'LLDB version provenance failed' }
+            $lldbMajor = [int]([regex]::Match($lldbText, '(?im)^\s*lldb version ([0-9]+)\.').Groups[1].Value)
+            $clangVersion = @(& $clangItem.FullName --version 2>&1)
+            $clangVersionRc = $LASTEXITCODE
+            $clangText = $clangVersion -join "`n"
+            if ($clangVersionRc -ne 0 -or $clangText -notmatch '(?m)^\s*clang version ([0-9]+)\.') { throw 'Clang version provenance failed for LLDB' }
+            $clangMajor = [int]([regex]::Match($clangText, '(?m)^\s*clang version ([0-9]+)\.').Groups[1].Value)
+            if ($lldbMajor -ne $clangMajor) { throw "LLDB/Clang major mismatch: lldb=$lldbMajor clang=$clangMajor" }
+            Write-Host "ISSUE74_LLDB path=$($lldbItem.FullName) major=$lldbMajor"
+            return $lldbItem
+          } catch {
+            Write-Warning "LLDB diagnostic provenance unavailable: $($_.Exception.Message)"
+            return $null
+          }
+        }
 
         $llvmAttempted = $false
         $llvmTools = $null
@@ -1205,6 +1255,9 @@ jobs:
                 $cLines = @(Get-Content -LiteralPath $cFiles[0].FullName -ErrorAction Stop)
                 Write-Host "ISSUE74_C_PATH key=$key path=$($cFiles[0].FullName) bytes=$($cFiles[0].Length)"
                 Write-CFunctionSnippet $cLines '^\s*int\s+(?:WINAPI\s+)?(?:wWinMain|wmain|main)\s*\([^;{}]*\)\s*\{\s*$' "$key-main"
+                Write-CFunctionSnippet $cLines '^\s*void\s+_vinit\s*\(\s*int\s+___argc\s*,\s*voidptr\s+___argv\s*\)\s*\{\s*$' "$key-vinit"
+                Write-CFunctionSnippet $cLines '^\s*main__vtest_init\(\);\s*$' "$key-vtest-init-call"
+                Write-CFunctionSnippet $cLines '^\s*_vinit\s*\(\s*___argc\s*,\s*\(voidptr\)\s*___argv\s*\)\s*;\s*$' "$key-vinit-call"
                 Write-CFunctionSnippet $cLines '^\s*_vtrunner\._method_start\(_vtobj,\s*[0-9]+\);\s*$' "$key-dump-start"
                 Write-CFunctionSnippet $cLines '^\s*(?:static\s+)?void\s+_vcleanup\s*\(void\)\s*\{' "$key-cleanup"
                 if (-not [string]::IsNullOrEmpty([string]$probe.CName)) {
@@ -1274,6 +1327,62 @@ jobs:
               [void](Write-BoundedDiagnostic (Join-Path $gcTemp 'diagnostic.stderr.txt') "$($generation.Name)-$($probe.Name)-gc-none-stderr")
             } catch {
               Write-Warning "ISSUE74_GC_NONE generation=$($generation.Name) probe=$($probe.Name) warning=$($_.Exception.Message)"
+            }
+          }
+        }
+
+        $checkoutItem = $null
+        try {
+          $checkoutItem = Get-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'gui') -Force -ErrorAction Stop
+          if (-not $checkoutItem.PSIsContainer -or ($checkoutItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'checkout is not a real directory' }
+        } catch {
+          Write-Warning "ISSUE74_LLDB canonical checkout is unavailable: $($_.Exception.Message)"
+        }
+        if ($null -ne $checkoutItem) {
+          foreach ($generation in $generations) {
+            foreach ($probe in @($probes | Where-Object { $_.Name -in @('empty', 'selected') })) {
+              $observation = $observations["$($generation.Name)-$($probe.Name)"]
+              if ($null -eq $observation -or $observation.Hex -cne '0xC0000409') { continue }
+              try {
+                $debugTemp = Join-Path $env:RUNNER_TEMP "issue74-host-clang-$($generation.Name)-$($probe.Name)-lldb"
+                if (Test-Path -LiteralPath $debugTemp) { throw "Fresh LLDB VTMP already exists: $debugTemp" }
+                New-Item -ItemType Directory -Path $debugTemp | Out-Null
+                $debugTempItem = Get-Item -LiteralPath $debugTemp -Force
+                if (-not $debugTempItem.PSIsContainer -or ($debugTempItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'LLDB VTMP is not a real directory' }
+                $debugExe = Join-Path $debugTempItem.FullName 'debug.exe'
+                if (Test-Path -LiteralPath $debugExe) { throw "Fresh debug PE already exists: $debugExe" }
+                $compileStdout = Join-Path $debugTempItem.FullName 'compile.stdout.txt'
+                $compileStderr = Join-Path $debugTempItem.FullName 'compile.stderr.txt'
+                $env:VTMP = $debugTempItem.FullName
+                $debugCompilerArgs = @($generation.Args)
+                & v @debugCompilerArgs -no-parallel -cc clang -no-retry-compilation -showcc -keepc -g -skip-running -o $debugExe -test-runner dump -run-only $probe.Function run $probe.File 1> $compileStdout 2> $compileStderr
+                $compileRc = $LASTEXITCODE
+                Write-Host "ISSUE74_DEBUG_COMPILE generation=$($generation.Name) probe=$($probe.Name) rc=$compileRc hex=$(Format-RcHex $compileRc)"
+                [void](Write-BoundedDiagnostic $compileStdout "$($generation.Name)-$($probe.Name)-debug-compile-stdout")
+                [void](Write-BoundedDiagnostic $compileStderr "$($generation.Name)-$($probe.Name)-debug-compile-stderr")
+                if ($compileRc -ne 0) { throw "Debug clone compile failed: rc=$compileRc" }
+                $debugExeItem = Get-Item -LiteralPath $debugExe -Force -ErrorAction Stop
+                if (-not ($debugExeItem -is [IO.FileInfo]) -or ($debugExeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                    $debugExeItem.Length -le 0 -or $debugExeItem.Length -gt 67108864) { throw 'Debug clone PE is not a bounded real file' }
+
+                $direct = Invoke-BoundedProcess -FilePath $debugExeItem.FullName -ArgumentList ([string[]]@()) -WorkingDirectory $checkoutItem.FullName -Prefix (Join-Path $debugTempItem.FullName 'direct')
+                Write-Host "ISSUE74_DEBUG_DIRECT generation=$($generation.Name) probe=$($probe.Name) rc=$($direct.Rc) hex=$($direct.Hex)"
+                [void](Write-BoundedDiagnostic $direct.Stdout "$($generation.Name)-$($probe.Name)-debug-direct-stdout")
+                [void](Write-BoundedDiagnostic $direct.Stderr "$($generation.Name)-$($probe.Name)-debug-direct-stderr")
+                if ($direct.Hex -cne '0xC0000409') {
+                  Write-Warning "Debug clone did not reproduce C0000409 for $($generation.Name)-$($probe.Name)"
+                  continue
+                }
+                $lldbItem = Get-LldbDiagnosticTool
+                if ($null -eq $lldbItem) { continue }
+                $lldbArgs = @('--batch', '-o', 'run', '-o', '"thread backtrace all"', '--', ('"{0}"' -f $debugExeItem.FullName))
+                $lldb = Invoke-BoundedProcess -FilePath $lldbItem.FullName -ArgumentList $lldbArgs -WorkingDirectory $checkoutItem.FullName -Prefix (Join-Path $debugTempItem.FullName 'lldb')
+                Write-Host "ISSUE74_LLDB_RUN generation=$($generation.Name) probe=$($probe.Name) rc=$($lldb.Rc) hex=$($lldb.Hex)"
+                [void](Write-BoundedDiagnostic $lldb.Stdout "$($generation.Name)-$($probe.Name)-lldb-stdout")
+                [void](Write-BoundedDiagnostic $lldb.Stderr "$($generation.Name)-$($probe.Name)-lldb-stderr")
+              } catch {
+                Write-Warning "ISSUE74_LLDB generation=$($generation.Name) probe=$($probe.Name) warning=$($_.Exception.Message)"
+              }
             }
           }
         }

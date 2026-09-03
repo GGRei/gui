@@ -1186,15 +1186,16 @@ fn selftest_cli(arguments []string) int {
 }
 
 fn main() {
-	arguments := normalize_cli_arguments(os.args) or {
+	runtime_args := arguments()
+	canonical_args := normalize_cli_arguments(runtime_args) or {
 		eprintln(err.msg())
 		exit(1)
 	}
-	if arguments.len >= 2 && arguments[1] == 'compare-files' {
-		exit(compare_files_cli(arguments[2..]))
+	if canonical_args.len >= 2 && canonical_args[1] == 'compare-files' {
+		exit(compare_files_cli(canonical_args[2..]))
 	}
-	if arguments.len >= 2 && arguments[1] == '--selftest' {
-		exit(selftest_cli(arguments))
+	if canonical_args.len >= 2 && canonical_args[1] == '--selftest' {
+		exit(selftest_cli(canonical_args))
 	}
-	exit(verify_cli(arguments))
+	exit(verify_cli(canonical_args))
 }
