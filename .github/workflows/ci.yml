@@ -15,6 +15,7 @@ on:
       - "**.wgsl"
       - "**/ci.yml"
       - ".github/workflows/*.yml"
+      - ".github/workflows/issue74/**"
   pull_request:
     paths:
       - "**.v"
@@ -29,10 +30,17 @@ on:
       - "**.wgsl"
       - "**/ci.yml"
       - ".github/workflows/*.yml"
+      - ".github/workflows/issue74/**"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
+
+env:
+  V_REPOSITORY: https://github.com/GGRei/v.git
+  V_REVISION: 7280d51a401423434e09e24823c0f3f6a548dc9b
+  VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
+  VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
 
 jobs:
   linting:
@@ -41,13 +49,31 @@ jobs:
     env:
       VFLAGS: -no-parallel
     steps:
-      - name: Install V
-        id: install-v
-        uses: vlang/setup-v@v1.4
-        with:
-          check-latest: true
-      - name: Install vglyph
-        run: v install vglyph
+      - name: Install pinned V and vglyph
+        shell: bash
+        run: |
+          set -euo pipefail
+          v_revision='${{ env.V_REVISION }}'
+          vglyph_revision='${{ env.VGLYPH_REVISION }}'
+          [[ "$v_revision" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$vglyph_revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "V revision: $v_revision"
+          echo "vglyph revision: $vglyph_revision"
+          git init "$RUNNER_TEMP/v"
+          git -C "$RUNNER_TEMP/v" remote add origin '${{ env.V_REPOSITORY }}'
+          git -C "$RUNNER_TEMP/v" fetch --depth 1 origin "$v_revision"
+          git -C "$RUNNER_TEMP/v" checkout --detach FETCH_HEAD
+          make -C "$RUNNER_TEMP/v" -j2
+          modules="$RUNNER_TEMP/vmodules"
+          mkdir -p "$modules/vglyph"
+          git init "$modules/vglyph"
+          git -C "$modules/vglyph" remote add origin '${{ env.VGLYPH_REPOSITORY }}'
+          git -C "$modules/vglyph" fetch --depth 1 origin "$vglyph_revision"
+          git -C "$modules/vglyph" checkout --detach FETCH_HEAD
+          [[ "$(git -C "$RUNNER_TEMP/v" rev-parse HEAD)" == "$v_revision" ]]
+          [[ "$(git -C "$modules/vglyph" rev-parse HEAD)" == "$vglyph_revision" ]]
+          echo "VMODULES=$modules" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/v" >> "$GITHUB_PATH"
       - name: Install C development dependencies (headers and libs)
         if: runner.os == 'Linux'
         run: v retry -- sudo apt -qq update && v retry -- sudo apt install libpango1.0-dev libfontconfig1-dev libfribidi-dev libharfbuzz-dev libfreetype-dev libgl1-mesa-dri xvfb libxcursor-dev libxi-dev libxrandr-dev freeglut3-dev dbus libdbus-1-dev libdbus-glib-1-2 libdbus-glib-1-dev
@@ -98,20 +124,44 @@ jobs:
   compiling:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
-      fail-fast: true
+        include:
+          - os: ubuntu-latest
+            cc: gcc
+          - os: ubuntu-latest
+            cc: clang
+          - os: macos-latest
+            cc: clang
+      fail-fast: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     env:
       VFLAGS: -no-parallel
     steps:
-      - name: Install V
-        id: install-v
-        uses: vlang/setup-v@v1.4
-        with:
-          check-latest: true
-      - name: Install vglyph
-        run: v install vglyph
+      - name: Install pinned V and vglyph
+        shell: bash
+        run: |
+          set -euo pipefail
+          v_revision='${{ env.V_REVISION }}'
+          vglyph_revision='${{ env.VGLYPH_REVISION }}'
+          [[ "$v_revision" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$vglyph_revision" =~ ^[0-9a-f]{40}$ ]]
+          echo "V revision: $v_revision"
+          echo "vglyph revision: $vglyph_revision"
+          git init "$RUNNER_TEMP/v"
+          git -C "$RUNNER_TEMP/v" remote add origin '${{ env.V_REPOSITORY }}'
+          git -C "$RUNNER_TEMP/v" fetch --depth 1 origin "$v_revision"
+          git -C "$RUNNER_TEMP/v" checkout --detach FETCH_HEAD
+          make -C "$RUNNER_TEMP/v" -j2
+          modules="$RUNNER_TEMP/vmodules"
+          mkdir -p "$modules/vglyph"
+          git init "$modules/vglyph"
+          git -C "$modules/vglyph" remote add origin '${{ env.VGLYPH_REPOSITORY }}'
+          git -C "$modules/vglyph" fetch --depth 1 origin "$vglyph_revision"
+          git -C "$modules/vglyph" checkout --detach FETCH_HEAD
+          [[ "$(git -C "$RUNNER_TEMP/v" rev-parse HEAD)" == "$v_revision" ]]
+          [[ "$(git -C "$modules/vglyph" rev-parse HEAD)" == "$vglyph_revision" ]]
+          echo "VMODULES=$modules" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/v" >> "$GITHUB_PATH"
       - name: Install X11/GL development dependencies (headers and libs)
         if: runner.os == 'Linux'
         run: v retry -- sudo apt -qq update && v retry -- sudo apt install libpango1.0-dev libfontconfig1-dev libfribidi-dev libharfbuzz-dev libfreetype-dev libgl1-mesa-dri xvfb libxcursor-dev libxi-dev libxrandr-dev freeglut3-dev dbus libdbus-1-dev libdbus-glib-1-2 libdbus-glib-1-dev
@@ -126,7 +176,7 @@ jobs:
       - name: Run tests
         env:
           GUI_CHECK_GENERATED_SHADERS: "1"
-          VFLAGS: -no-parallel -cc clang
+          VFLAGS: -no-parallel -cc ${{ matrix.cc }}
         run: |
           test_manifest="${RUNNER_TEMP}/gui-test-files"
           git -C gui ls-files '*_test.v' | LC_ALL=C sort > "$test_manifest"
@@ -137,16 +187,17 @@ jobs:
             i=$((i + 1))
             echo "[$i/$test_count] gui/$file"
           done < "$test_manifest"
-          v test gui/
+          V_MACOS_V3_NO_FALLBACK=1 v -new-compiler -gc none test gui/
+          v -old-compiler test gui/
       - name: Check compilation of examples
         if: github.event_name == 'pull_request'
         env:
-          VFLAGS: -no-parallel -cc clang
+          VFLAGS: -no-parallel -cc ${{ matrix.cc }}
         run: v should-compile-all gui/examples/
       - name: Check compilation of changed examples with -W
         if: github.event_name == 'pull_request'
         env:
-          VFLAGS: -no-parallel -cc clang
+          VFLAGS: -no-parallel -cc ${{ matrix.cc }}
         working-directory: gui
         run: |
           base_ref="${{ github.base_ref }}"
@@ -169,23 +220,31 @@ jobs:
       - name: Check compilation of examples without warning-fatal mode
         if: github.event_name != 'pull_request'
         env:
-          VFLAGS: -no-parallel -cc clang
+          VFLAGS: -no-parallel -cc ${{ matrix.cc }}
         run: v gui/examples/_build.vsh --no-warnings
 
   compiling-on-windows:
     runs-on: windows-latest
-    timeout-minutes: 70
+    timeout-minutes: 120
     env:
       VFLAGS: -no-parallel
+      VMODULES: ${{ github.workspace }}\.vmodules
       VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
+      VCPKG_CACHE_SCHEMA: gui-issue74-v1
+      VCPKG_PACKAGES: freetype,pango
+      VCPKG_TARGET_TRIPLET: x64-windows
     steps:
       - name: Resolve V revision
         id: v
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+          $revision = '${{ env.V_REVISION }}'
+          if ($revision -notmatch '^[0-9a-f]{40}$') {
+            throw "V revision is not an exact 40-hex SHA: $revision"
+          }
+          Write-Host "V revision: $revision"
           "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
       - name: Restore V compiler cache
         id: restore-v-cache
@@ -218,7 +277,7 @@ jobs:
             }
             git init v
             Assert-NativeCommand "git init failed"
-            git -C v remote add origin https://github.com/vlang/v
+            git -C v remote add origin '${{ env.V_REPOSITORY }}'
             Assert-NativeCommand "git remote add failed"
             git -C v fetch --depth 1 origin $expectedRevision
             Assert-NativeCommand "git fetch failed"
@@ -236,6 +295,10 @@ jobs:
           $version = (& .\v\v.exe version).Trim()
           $revision = (& git -C v rev-parse HEAD).Trim()
           Assert-NativeCommand "Could not inspect V revision"
+          if ($revision -ne $expectedRevision) {
+            throw "Installed V revision $revision does not match expected $expectedRevision"
+          }
+          Write-Host "Resolved V revision: $revision"
           "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
           "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
       - name: Log V version
@@ -251,30 +314,68 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not resolve vglyph revision"
+          $revision = '${{ env.VGLYPH_REVISION }}'
+          if ($revision -notmatch '^[0-9a-f]{40}$') {
+            throw "vglyph revision is not an exact 40-hex SHA: $revision"
           }
+          Write-Host "vglyph revision: $revision"
           "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Resolve vcpkg revision
+        id: vcpkg
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = (Get-Command vcpkg -ErrorAction Stop).Source
+          $root = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Split-Path -Parent $exe }
+          $revision = (& git -C $root rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+            throw 'Could not resolve the vcpkg checkout revision'
+          }
+          $schema = '${{ env.VCPKG_CACHE_SCHEMA }}'
+          $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+          $packages = '${{ env.VCPKG_PACKAGES }}'
+          if ($schema -notmatch '^[A-Za-z0-9._-]+$' -or $triplet -notmatch '^[A-Za-z0-9._-]+$' -or $packages -notmatch '^[a-z0-9+._-]+(?:,[a-z0-9+._-]+)*$') {
+            throw 'Invalid vcpkg cache input'
+          }
+          $cacheInputs = "schema=$schema;triplet=$triplet;packages=$packages"
+          $sha256 = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($cacheInputs)
+            $inputsDigest = ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+          } finally {
+            $sha256.Dispose()
+          }
+          Write-Host "vcpkg revision: $revision"
+          Write-Host "vcpkg cache inputs: $cacheInputs"
+          Write-Host "vcpkg cache inputs SHA-256: $inputsDigest"
+          "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+          "inputs_digest=$inputsDigest" | Add-Content -Path $env:GITHUB_OUTPUT
+          "triplet=$triplet" | Add-Content -Path $env:GITHUB_OUTPUT
       - name: Restore vcpkg binary cache
         id: restore-vcpkg-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.VCPKG_BINARY_CACHE }}
-          key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v2
+          key: windows-vcpkg-${{ steps.vcpkg.outputs.triplet }}-${{ steps.vcpkg.outputs.revision }}-${{ steps.vcpkg.outputs.inputs_digest }}
           restore-keys: |
-            windows-vcpkg-x64-windows-pango-freetype-
+            windows-vcpkg-${{ steps.vcpkg.outputs.triplet }}-${{ steps.vcpkg.outputs.revision }}-
       - name: Restore V module cache
         id: restore-vglyph-cache
         uses: actions/cache/restore@v4
         with:
-          path: ~/.vmodules/vglyph
+          path: ${{ env.VMODULES }}\vglyph
           key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
       - name: Install pango and freetype
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
-          vcpkg install pango freetype
+          $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+          $packageSpecs = @('${{ env.VCPKG_PACKAGES }}'.Split(',') | ForEach-Object { "$($_):$triplet" })
+          vcpkg install @packageSpecs
+          if ($LASTEXITCODE -ne 0) {
+            throw "vcpkg install failed"
+          }
       - name: Save vcpkg binary cache
         if: ${{ steps.restore-vcpkg-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
@@ -285,7 +386,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $triplet = 'x64-windows'
+          $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
           $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
           $roots = @()
           if ($vcpkgExe) {
@@ -361,7 +462,7 @@ jobs:
             }
           }
           $expectedRevision = '${{ steps.vglyph.outputs.revision }}'
-          $vglyphPath = Join-Path $HOME '.vmodules\vglyph'
+          $vglyphPath = Join-Path $env:VMODULES 'vglyph'
           if (Test-Path (Join-Path $vglyphPath '.git')) {
             $cachedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
             Assert-NativeCommand "Could not inspect cached vglyph revision"
@@ -377,18 +478,24 @@ jobs:
             New-Item -ItemType Directory -Force -Path $vmodulesPath | Out-Null
             git init $vglyphPath
             Assert-NativeCommand "git init vglyph failed"
-            git -C $vglyphPath remote add origin https://github.com/vlang/vglyph
+            git -C $vglyphPath remote add origin '${{ env.VGLYPH_REPOSITORY }}'
             Assert-NativeCommand "git remote add vglyph failed"
             git -C $vglyphPath fetch --depth 1 origin $expectedRevision
             Assert-NativeCommand "git fetch vglyph failed"
             git -C $vglyphPath checkout --detach FETCH_HEAD
             Assert-NativeCommand "git checkout vglyph failed"
           }
+          $resolvedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
+          Assert-NativeCommand "Could not inspect resolved vglyph revision"
+          if ($resolvedRevision -ne $expectedRevision) {
+            throw "Resolved vglyph revision $resolvedRevision does not match expected $expectedRevision"
+          }
+          Write-Host "Resolved vglyph revision: $resolvedRevision"
       - name: Save V module cache
         if: ${{ steps.restore-vglyph-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
-          path: ~/.vmodules/vglyph
+          path: ${{ env.VMODULES }}\vglyph
           key: ${{ steps.restore-vglyph-cache.outputs.cache-primary-key }}
       - name: Checkout the gui module
         uses: actions/checkout@v6
@@ -397,6 +504,23 @@ jobs:
           fetch-depth: 0
       - name: Configure MSVC developer environment
         uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Verify Windows V3 stub rejection
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = Join-Path $env:RUNNER_TEMP 'v3-stub.v'
+          $output = Join-Path $env:RUNNER_TEMP 'v3-stub.exe'
+          Set-Content -LiteralPath $source -Encoding ascii -Value 'fn main() {}'
+          v -new-compiler -gc none -cc msvc -o $output $source 2>&1 | Tee-Object -Variable text
+          $code = $LASTEXITCODE
+          if ($code -eq 0 -or (Test-Path $output)) {
+            throw 'Windows top-level V3 stub unexpectedly compiled the canary'
+          }
+          $expected = '`-new-compiler` requires a build that embeds the V3 compiler, which this one does not.'
+          if (([regex]::Matches(($text | Out-String), [regex]::Escape($expected))).Count -ne 1) {
+            throw 'Windows V3 stub diagnostic cardinality mismatch'
+          }
       - name: Run Windows setup preflight
         env:
           GUI_WINDOWS_PREFLIGHT_CC: msvc

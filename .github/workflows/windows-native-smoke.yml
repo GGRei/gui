@@ -7,32 +7,39 @@ on:
         description: "Install/cache MSVC vcpkg/vglyph dependencies only; skip tests and examples"
         type: boolean
         default: false
-      run_clang:
-        description: "Also run exploratory Clang smoke; may rebuild non-MSVC vcpkg ABI"
-        type: boolean
-        default: false
       run_mingw:
-        description: "Also run exploratory MinGW/MSYS2 smoke"
+        description: "Run required UCRT64, CLANG64 and MINGW64 issue #74 static-link diagnostics"
         type: boolean
-        default: false
+        default: true
       run_d3d11:
         description: "Also compile D3D11 probes; requires a V build with -d sokol_d3d11 support"
         type: boolean
         default: false
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 env:
+  V_REPOSITORY: https://github.com/GGRei/v.git
+  V_REVISION: 7280d51a401423434e09e24823c0f3f6a548dc9b
+  VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
+  VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
+  VMODULES: ${{ github.workspace }}\.vmodules
   VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
   VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
+  VCPKG_CACHE_SCHEMA: gui-issue74-v1
+  VCPKG_PACKAGES: freetype,pango
+  VCPKG_TARGET_TRIPLET: x64-windows
 
 jobs:
   prewarm-msvc-deps:
     name: Prewarm MSVC/vcpkg deps
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     if: ${{ inputs.prewarm_deps_only }}
     steps:
     - name: Resolve V revision
@@ -40,7 +47,11 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        $revision = '${{ env.V_REVISION }}'
+        if ($revision -notmatch '^[0-9a-f]{40}$') {
+          throw "V revision is not an exact 40-hex SHA: $revision"
+        }
+        Write-Host "V revision: $revision"
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore V compiler cache
       id: restore-v-cache
@@ -73,7 +84,7 @@ jobs:
           }
           git init v
           Assert-NativeCommand "git init failed"
-          git -C v remote add origin https://github.com/vlang/v
+          git -C v remote add origin '${{ env.V_REPOSITORY }}'
           Assert-NativeCommand "git remote add failed"
           git -C v fetch --depth 1 origin $expectedRevision
           Assert-NativeCommand "git fetch failed"
@@ -91,6 +102,10 @@ jobs:
         $version = ( & .\v\v.exe version).Trim()
         $revision = ( & git -C v rev-parse HEAD).Trim()
         Assert-NativeCommand "Could not inspect V revision"
+        if ($revision -ne $expectedRevision) {
+          throw "Installed V revision $revision does not match expected $expectedRevision"
+        }
+        Write-Host "Resolved V revision: $revision"
         "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Log V version
@@ -106,22 +121,56 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
-        if ($LASTEXITCODE -ne 0) {
-          throw "Could not resolve vglyph revision"
+        $revision = '${{ env.VGLYPH_REVISION }}'
+        if ($revision -notmatch '^[0-9a-f]{40}$') {
+          throw "vglyph revision is not an exact 40-hex SHA: $revision"
         }
+        Write-Host "vglyph revision: $revision"
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Resolve vcpkg revision
+      id: vcpkg
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $vcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Split-Path -Parent $vcpkgExe }
+        $revision = (& git -C $vcpkgRoot rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+          throw "Could not resolve the vcpkg checkout revision at $vcpkgRoot"
+        }
+        $schema = '${{ env.VCPKG_CACHE_SCHEMA }}'
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+        $packages = '${{ env.VCPKG_PACKAGES }}'
+        if ($schema -notmatch '^[A-Za-z0-9._-]+$' -or $triplet -notmatch '^[A-Za-z0-9._-]+$' -or $packages -notmatch '^[a-z0-9+._-]+(?:,[a-z0-9+._-]+)*$') {
+          throw 'Invalid vcpkg cache input'
+        }
+        $cacheInputs = "schema=$schema;triplet=$triplet;packages=$packages"
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($cacheInputs)
+          $inputsDigest = ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+        } finally {
+          $sha256.Dispose()
+        }
+        & $vcpkgExe version
+        Write-Host "vcpkg revision: $revision"
+        Write-Host "vcpkg cache inputs: $cacheInputs"
+        Write-Host "vcpkg cache inputs SHA-256: $inputsDigest"
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+        "inputs_digest=$inputsDigest" | Add-Content -Path $env:GITHUB_OUTPUT
+        "triplet=$triplet" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore vcpkg binary cache
-      uses: actions/cache@v4
+      id: restore-vcpkg-cache
+      uses: actions/cache/restore@v4
       with:
         path: ${{ env.VCPKG_BINARY_CACHE }}
-        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        key: windows-vcpkg-${{ steps.vcpkg.outputs.triplet }}-${{ steps.vcpkg.outputs.revision }}-${{ steps.vcpkg.outputs.inputs_digest }}
         restore-keys: |
-          windows-vcpkg-x64-windows-pango-freetype-
+          windows-vcpkg-${{ steps.vcpkg.outputs.triplet }}-${{ steps.vcpkg.outputs.revision }}-
     - name: Restore V module cache
       uses: actions/cache@v4
       with:
-        path: ~/.vmodules/vglyph
+        path: ${{ env.VMODULES }}\vglyph
         key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
@@ -129,13 +178,25 @@ jobs:
     - name: Install pango and freetype
       shell: pwsh
       run: |
+        $ErrorActionPreference = 'Stop'
         New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
-        vcpkg install pango freetype
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+        $packageSpecs = @('${{ env.VCPKG_PACKAGES }}'.Split(',') | ForEach-Object { "$($_):$triplet" })
+        vcpkg install @packageSpecs
+        if ($LASTEXITCODE -ne 0) {
+          throw "vcpkg install failed"
+        }
+    - name: Save vcpkg binary cache
+      if: ${{ steps.restore-vcpkg-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
     - name: Expose vcpkg pkg-config paths
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $triplet = 'x64-windows'
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
         $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
         $roots = @()
         if ($vcpkgExe) {
@@ -208,7 +269,7 @@ jobs:
           }
         }
         $expectedRevision = '${{ steps.vglyph.outputs.revision }}'
-        $vglyphPath = Join-Path $HOME '.vmodules\vglyph'
+        $vglyphPath = Join-Path $env:VMODULES 'vglyph'
         if (Test-Path (Join-Path $vglyphPath '.git')) {
           $cachedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
           Assert-NativeCommand "Could not inspect cached vglyph revision"
@@ -224,18 +285,24 @@ jobs:
           New-Item -ItemType Directory -Force -Path $vmodulesPath | Out-Null
           git init $vglyphPath
           Assert-NativeCommand "git init vglyph failed"
-          git -C $vglyphPath remote add origin https://github.com/vlang/vglyph
+          git -C $vglyphPath remote add origin '${{ env.VGLYPH_REPOSITORY }}'
           Assert-NativeCommand "git remote add vglyph failed"
           git -C $vglyphPath fetch --depth 1 origin $expectedRevision
           Assert-NativeCommand "git fetch vglyph failed"
           git -C $vglyphPath checkout --detach FETCH_HEAD
           Assert-NativeCommand "git checkout vglyph failed"
         }
+        $resolvedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
+        Assert-NativeCommand "Could not inspect resolved vglyph revision"
+        if ($resolvedRevision -ne $expectedRevision) {
+          throw "Resolved vglyph revision $resolvedRevision does not match expected $expectedRevision"
+        }
+        Write-Host "Resolved vglyph revision: $resolvedRevision"
 
   msvc:
     name: MSVC native smoke
     runs-on: windows-latest
-    timeout-minutes: 25
+    timeout-minutes: 90
     if: ${{ !inputs.prewarm_deps_only }}
     steps:
     - name: Resolve V revision
@@ -243,7 +310,11 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        $revision = '${{ env.V_REVISION }}'
+        if ($revision -notmatch '^[0-9a-f]{40}$') {
+          throw "V revision is not an exact 40-hex SHA: $revision"
+        }
+        Write-Host "V revision: $revision"
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore V compiler cache
       id: restore-v-cache
@@ -276,7 +347,7 @@ jobs:
           }
           git init v
           Assert-NativeCommand "git init failed"
-          git -C v remote add origin https://github.com/vlang/v
+          git -C v remote add origin '${{ env.V_REPOSITORY }}'
           Assert-NativeCommand "git remote add failed"
           git -C v fetch --depth 1 origin $expectedRevision
           Assert-NativeCommand "git fetch failed"
@@ -294,6 +365,10 @@ jobs:
         $version = ( & .\v\v.exe version).Trim()
         $revision = ( & git -C v rev-parse HEAD).Trim()
         Assert-NativeCommand "Could not inspect V revision"
+        if ($revision -ne $expectedRevision) {
+          throw "Installed V revision $revision does not match expected $expectedRevision"
+        }
+        Write-Host "Resolved V revision: $revision"
         "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Log V version
@@ -309,22 +384,56 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
-        if ($LASTEXITCODE -ne 0) {
-          throw "Could not resolve vglyph revision"
+        $revision = '${{ env.VGLYPH_REVISION }}'
+        if ($revision -notmatch '^[0-9a-f]{40}$') {
+          throw "vglyph revision is not an exact 40-hex SHA: $revision"
         }
+        Write-Host "vglyph revision: $revision"
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Resolve vcpkg revision
+      id: vcpkg
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $vcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Split-Path -Parent $vcpkgExe }
+        $revision = (& git -C $vcpkgRoot rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+          throw "Could not resolve the vcpkg checkout revision at $vcpkgRoot"
+        }
+        $schema = '${{ env.VCPKG_CACHE_SCHEMA }}'
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+        $packages = '${{ env.VCPKG_PACKAGES }}'
+        if ($schema -notmatch '^[A-Za-z0-9._-]+$' -or $triplet -notmatch '^[A-Za-z0-9._-]+$' -or $packages -notmatch '^[a-z0-9+._-]+(?:,[a-z0-9+._-]+)*$') {
+          throw 'Invalid vcpkg cache input'
+        }
+        $cacheInputs = "schema=$schema;triplet=$triplet;packages=$packages"
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($cacheInputs)
+          $inputsDigest = ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+        } finally {
+          $sha256.Dispose()
+        }
+        & $vcpkgExe version
+        Write-Host "vcpkg revision: $revision"
+        Write-Host "vcpkg cache inputs: $cacheInputs"
+        Write-Host "vcpkg cache inputs SHA-256: $inputsDigest"
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+        "inputs_digest=$inputsDigest" | Add-Content -Path $env:GITHUB_OUTPUT
+        "triplet=$triplet" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore vcpkg binary cache
-      uses: actions/cache@v4
+      id: restore-vcpkg-cache
+      uses: actions/cache/restore@v4
       with:
         path: ${{ env.VCPKG_BINARY_CACHE }}
-        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        key: windows-vcpkg-${{ steps.vcpkg.outputs.triplet }}-${{ steps.vcpkg.outputs.revision }}-${{ steps.vcpkg.outputs.inputs_digest }}
         restore-keys: |
-          windows-vcpkg-x64-windows-pango-freetype-
+          windows-vcpkg-${{ steps.vcpkg.outputs.triplet }}-${{ steps.vcpkg.outputs.revision }}-
     - name: Restore V module cache
       uses: actions/cache@v4
       with:
-        path: ~/.vmodules/vglyph
+        path: ${{ env.VMODULES }}\vglyph
         key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
@@ -332,13 +441,25 @@ jobs:
     - name: Install pango and freetype
       shell: pwsh
       run: |
+        $ErrorActionPreference = 'Stop'
         New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
-        vcpkg install pango freetype
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+        $packageSpecs = @('${{ env.VCPKG_PACKAGES }}'.Split(',') | ForEach-Object { "$($_):$triplet" })
+        vcpkg install @packageSpecs
+        if ($LASTEXITCODE -ne 0) {
+          throw "vcpkg install failed"
+        }
+    - name: Save vcpkg binary cache
+      if: ${{ steps.restore-vcpkg-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
     - name: Expose vcpkg pkg-config paths
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $triplet = 'x64-windows'
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
         $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
         $roots = @()
         if ($vcpkgExe) {
@@ -411,7 +532,7 @@ jobs:
           }
         }
         $expectedRevision = '${{ steps.vglyph.outputs.revision }}'
-        $vglyphPath = Join-Path $HOME '.vmodules\vglyph'
+        $vglyphPath = Join-Path $env:VMODULES 'vglyph'
         if (Test-Path (Join-Path $vglyphPath '.git')) {
           $cachedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
           Assert-NativeCommand "Could not inspect cached vglyph revision"
@@ -427,13 +548,19 @@ jobs:
           New-Item -ItemType Directory -Force -Path $vmodulesPath | Out-Null
           git init $vglyphPath
           Assert-NativeCommand "git init vglyph failed"
-          git -C $vglyphPath remote add origin https://github.com/vlang/vglyph
+          git -C $vglyphPath remote add origin '${{ env.VGLYPH_REPOSITORY }}'
           Assert-NativeCommand "git remote add vglyph failed"
           git -C $vglyphPath fetch --depth 1 origin $expectedRevision
           Assert-NativeCommand "git fetch vglyph failed"
           git -C $vglyphPath checkout --detach FETCH_HEAD
           Assert-NativeCommand "git checkout vglyph failed"
         }
+        $resolvedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
+        Assert-NativeCommand "Could not inspect resolved vglyph revision"
+        if ($resolvedRevision -ne $expectedRevision) {
+          throw "Resolved vglyph revision $resolvedRevision does not match expected $expectedRevision"
+        }
+        Write-Host "Resolved vglyph revision: $resolvedRevision"
     - name: Checkout gui
       uses: actions/checkout@v4
       with:
@@ -482,18 +609,21 @@ jobs:
         }
 
   clang:
-    name: Clang native smoke (exploratory)
+    name: Clang native smoke
     runs-on: windows-latest
-    timeout-minutes: 25
-    continue-on-error: true
-    if: ${{ !inputs.prewarm_deps_only && inputs.run_clang }}
+    timeout-minutes: 120
+    if: ${{ !inputs.prewarm_deps_only }}
     steps:
     - name: Resolve V revision
       id: v
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        $revision = '${{ env.V_REVISION }}'
+        if ($revision -notmatch '^[0-9a-f]{40}$') {
+          throw "V revision is not an exact 40-hex SHA: $revision"
+        }
+        Write-Host "V revision: $revision"
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore V compiler cache
       id: restore-v-cache
@@ -526,7 +656,7 @@ jobs:
           }
           git init v
           Assert-NativeCommand "git init failed"
-          git -C v remote add origin https://github.com/vlang/v
+          git -C v remote add origin '${{ env.V_REPOSITORY }}'
           Assert-NativeCommand "git remote add failed"
           git -C v fetch --depth 1 origin $expectedRevision
           Assert-NativeCommand "git fetch failed"
@@ -544,6 +674,10 @@ jobs:
         $version = ( & .\v\v.exe version).Trim()
         $revision = ( & git -C v rev-parse HEAD).Trim()
         Assert-NativeCommand "Could not inspect V revision"
+        if ($revision -ne $expectedRevision) {
+          throw "Installed V revision $revision does not match expected $expectedRevision"
+        }
+        Write-Host "Resolved V revision: $revision"
         "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Log V version
@@ -559,22 +693,56 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
-        if ($LASTEXITCODE -ne 0) {
-          throw "Could not resolve vglyph revision"
+        $revision = '${{ env.VGLYPH_REVISION }}'
+        if ($revision -notmatch '^[0-9a-f]{40}$') {
+          throw "vglyph revision is not an exact 40-hex SHA: $revision"
         }
+        Write-Host "vglyph revision: $revision"
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+    - name: Resolve vcpkg revision
+      id: vcpkg
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $vcpkgRoot = if ($env:VCPKG_ROOT) { $env:VCPKG_ROOT } else { Split-Path -Parent $vcpkgExe }
+        $revision = (& git -C $vcpkgRoot rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $revision -notmatch '^[0-9a-f]{40}$') {
+          throw "Could not resolve the vcpkg checkout revision at $vcpkgRoot"
+        }
+        $schema = '${{ env.VCPKG_CACHE_SCHEMA }}'
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+        $packages = '${{ env.VCPKG_PACKAGES }}'
+        if ($schema -notmatch '^[A-Za-z0-9._-]+$' -or $triplet -notmatch '^[A-Za-z0-9._-]+$' -or $packages -notmatch '^[a-z0-9+._-]+(?:,[a-z0-9+._-]+)*$') {
+          throw 'Invalid vcpkg cache input'
+        }
+        $cacheInputs = "schema=$schema;triplet=$triplet;packages=$packages"
+        $sha256 = [System.Security.Cryptography.SHA256]::Create()
+        try {
+          $bytes = [System.Text.Encoding]::UTF8.GetBytes($cacheInputs)
+          $inputsDigest = ([System.BitConverter]::ToString($sha256.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant()
+        } finally {
+          $sha256.Dispose()
+        }
+        & $vcpkgExe version
+        Write-Host "vcpkg revision: $revision"
+        Write-Host "vcpkg cache inputs: $cacheInputs"
+        Write-Host "vcpkg cache inputs SHA-256: $inputsDigest"
+        "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
+        "inputs_digest=$inputsDigest" | Add-Content -Path $env:GITHUB_OUTPUT
+        "triplet=$triplet" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore vcpkg binary cache
-      uses: actions/cache@v4
+      id: restore-vcpkg-cache
+      uses: actions/cache/restore@v4
       with:
         path: ${{ env.VCPKG_BINARY_CACHE }}
-        key: windows-vcpkg-x64-windows-pango-freetype-${{ steps.install-v.outputs.revision }}-v1
+        key: windows-vcpkg-${{ steps.vcpkg.outputs.triplet }}-${{ steps.vcpkg.outputs.revision }}-${{ steps.vcpkg.outputs.inputs_digest }}
         restore-keys: |
-          windows-vcpkg-x64-windows-pango-freetype-
+          windows-vcpkg-${{ steps.vcpkg.outputs.triplet }}-${{ steps.vcpkg.outputs.revision }}-
     - name: Restore V module cache
       uses: actions/cache@v4
       with:
-        path: ~/.vmodules/vglyph
+        path: ${{ env.VMODULES }}\vglyph
         key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
@@ -582,8 +750,87 @@ jobs:
     - name: Install pango and freetype
       shell: pwsh
       run: |
+        $ErrorActionPreference = 'Stop'
         New-Item -ItemType Directory -Force -Path "$env:VCPKG_BINARY_CACHE" | Out-Null
-        vcpkg install pango freetype
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+        $packageSpecs = @('${{ env.VCPKG_PACKAGES }}'.Split(',') | ForEach-Object { "$($_):$triplet" })
+        vcpkg install @packageSpecs
+        if ($LASTEXITCODE -ne 0) {
+          throw "vcpkg install failed"
+        }
+    - name: Save vcpkg binary cache
+      if: ${{ steps.restore-vcpkg-cache.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ env.VCPKG_BINARY_CACHE }}
+        key: ${{ steps.restore-vcpkg-cache.outputs.cache-primary-key }}
+    - name: Expose vcpkg pkg-config paths
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $triplet = '${{ env.VCPKG_TARGET_TRIPLET }}'
+        $vcpkgExe = (Get-Command vcpkg -ErrorAction Stop).Source
+        $roots = @()
+        if ($vcpkgExe) {
+          $roots += Split-Path -Parent $vcpkgExe
+        }
+        if ($env:VCPKG_ROOT) {
+          $roots += $env:VCPKG_ROOT
+        }
+        $vcpkgRoot = $null
+        foreach ($root in ($roots | Select-Object -Unique)) {
+          if (Test-Path (Join-Path $root "installed\$triplet")) {
+            $vcpkgRoot = $root
+            break
+          }
+        }
+        if (-not $vcpkgRoot) {
+          throw "Could not find vcpkg installed\$triplet from vcpkg.exe or VCPKG_ROOT"
+        }
+        $tripletRoot = Join-Path $vcpkgRoot "installed\$triplet"
+        $pkgConfigDirs = @(
+          (Join-Path $tripletRoot 'lib\pkgconfig'),
+          (Join-Path $tripletRoot 'share\pkgconfig')
+        ) | Where-Object { Test-Path $_ }
+        if ($pkgConfigDirs.Count -eq 0) {
+          throw "No pkgconfig directories found under $tripletRoot"
+        }
+        $pkgConfigPath = $pkgConfigDirs -join ';'
+        "PKG_CONFIG_PATH=$pkgConfigPath" | Add-Content -Path $env:GITHUB_ENV
+        $env:PKG_CONFIG_PATH = $pkgConfigPath
+        $pathEntries = @()
+        $binDir = Join-Path $tripletRoot 'bin'
+        if (Test-Path $binDir) {
+          $pathEntries += $binDir
+        }
+        $pkgconfDir = Join-Path $tripletRoot 'tools\pkgconf'
+        if (Test-Path $pkgconfDir) {
+          $pathEntries += $pkgconfDir
+        }
+        foreach ($entry in $pathEntries) {
+          $entry | Add-Content -Path $env:GITHUB_PATH
+        }
+        if ($pathEntries.Count -gt 0) {
+          $env:PATH = ($pathEntries + $env:PATH) -join ';'
+        }
+        if (-not (Get-Command pkg-config -ErrorAction SilentlyContinue)) {
+          $pkgconf = Get-Command pkgconf -ErrorAction SilentlyContinue
+          if ($pkgconf) {
+            $shimDir = Join-Path $env:RUNNER_TEMP 'pkg-config-shim'
+            New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+            Set-Content -Path (Join-Path $shimDir 'pkg-config.cmd') -Encoding ascii -Value @(
+              '@echo off',
+              '"' + $pkgconf.Source + '" %*'
+            )
+            $shimDir | Add-Content -Path $env:GITHUB_PATH
+            $env:PATH = "$shimDir;$env:PATH"
+          }
+        }
+        $pkgConfig = Get-Command pkg-config -ErrorAction Stop
+        & $pkgConfig.Source --exists freetype2 pango pangoft2
+        if ($LASTEXITCODE -ne 0) {
+          throw "pkg-config could not resolve freetype2 pango pangoft2"
+        }
     - name: Ensure vglyph revision
       shell: pwsh
       run: |
@@ -594,7 +841,7 @@ jobs:
           }
         }
         $expectedRevision = '${{ steps.vglyph.outputs.revision }}'
-        $vglyphPath = Join-Path $HOME '.vmodules\vglyph'
+        $vglyphPath = Join-Path $env:VMODULES 'vglyph'
         if (Test-Path (Join-Path $vglyphPath '.git')) {
           $cachedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
           Assert-NativeCommand "Could not inspect cached vglyph revision"
@@ -610,15 +857,32 @@ jobs:
           New-Item -ItemType Directory -Force -Path $vmodulesPath | Out-Null
           git init $vglyphPath
           Assert-NativeCommand "git init vglyph failed"
-          git -C $vglyphPath remote add origin https://github.com/vlang/vglyph
+          git -C $vglyphPath remote add origin '${{ env.VGLYPH_REPOSITORY }}'
           Assert-NativeCommand "git remote add vglyph failed"
           git -C $vglyphPath fetch --depth 1 origin $expectedRevision
           Assert-NativeCommand "git fetch vglyph failed"
           git -C $vglyphPath checkout --detach FETCH_HEAD
           Assert-NativeCommand "git checkout vglyph failed"
         }
+        $resolvedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
+        Assert-NativeCommand "Could not inspect resolved vglyph revision"
+        if ($resolvedRevision -ne $expectedRevision) {
+          throw "Resolved vglyph revision $resolvedRevision does not match expected $expectedRevision"
+        }
+        Write-Host "Resolved vglyph revision: $resolvedRevision"
     - name: Install vglyph
-      run: v install vglyph
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        v install vglyph
+        if ($LASTEXITCODE -ne 0) {
+          throw "v install vglyph failed"
+        }
+        $vglyphPath = Join-Path $env:VMODULES 'vglyph'
+        $resolvedRevision = (& git -C $vglyphPath rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or $resolvedRevision -ne '${{ steps.vglyph.outputs.revision }}') {
+          throw "v install changed the pinned vglyph revision to $resolvedRevision"
+        }
     - name: Checkout gui
       uses: actions/checkout@v4
       with:
@@ -664,19 +928,89 @@ jobs:
           }
         }
 
-  mingw:
-    name: MinGW native smoke (exploratory)
-    runs-on: windows-latest
-    timeout-minutes: 30
-    continue-on-error: true
+  resolve-ucrt64-revisions:
+    name: Resolve WinGNU diagnostic revisions
+    runs-on: ubuntu-latest
     if: ${{ !inputs.prewarm_deps_only && inputs.run_mingw }}
+    outputs:
+      v_revision: ${{ steps.revisions.outputs.v_revision }}
+      vglyph_revision: ${{ steps.revisions.outputs.vglyph_revision }}
+    steps:
+    - name: Resolve shared upstream revisions
+      id: revisions
+      shell: bash
+      run: |
+        set -euo pipefail
+        v_revision='${{ env.V_REVISION }}'
+        vglyph_revision='${{ env.VGLYPH_REVISION }}'
+        [[ "$v_revision" =~ ^[0-9a-f]{40}$ ]]
+        [[ "$vglyph_revision" =~ ^[0-9a-f]{40}$ ]]
+        echo "V revision: $v_revision"
+        echo "vglyph revision: $vglyph_revision"
+        echo "v_revision=$v_revision" >> "$GITHUB_OUTPUT"
+        echo "vglyph_revision=$vglyph_revision" >> "$GITHUB_OUTPUT"
+
+  mingw:
+    name: MSYS2 ${{ matrix.lane }} native/static smoke
+    needs: resolve-ucrt64-revisions
+    runs-on: windows-2025
+    timeout-minutes: 240
+    if: ${{ !inputs.prewarm_deps_only && inputs.run_mingw }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - lane: ucrt64-gcc
+          msystem: UCRT64
+          dependency_prefix: mingw-w64-ucrt-x86_64
+          cc: gcc
+          cxx: g++
+          compiler_package: mingw-w64-ucrt-x86_64-gcc
+          nm_tool: nm
+          object_package: mingw-w64-ucrt-x86_64-binutils
+          object_tool: objdump
+          lld_package: ''
+        - lane: ucrt64-clang
+          msystem: UCRT64
+          dependency_prefix: mingw-w64-ucrt-x86_64
+          cc: clang
+          cxx: clang++
+          compiler_package: mingw-w64-ucrt-x86_64-clang
+          nm_tool: nm
+          object_package: mingw-w64-ucrt-x86_64-binutils
+          object_tool: objdump
+          lld_package: mingw-w64-ucrt-x86_64-lld
+        - lane: clang64-clang
+          msystem: CLANG64
+          dependency_prefix: mingw-w64-clang-x86_64
+          cc: clang
+          cxx: clang++
+          compiler_package: mingw-w64-clang-x86_64-clang
+          nm_tool: llvm-nm
+          object_package: mingw-w64-clang-x86_64-llvm-tools
+          object_tool: llvm-objdump
+          lld_package: ''
+        - lane: mingw64-gcc
+          msystem: MINGW64
+          dependency_prefix: mingw-w64-x86_64
+          cc: gcc
+          cxx: g++
+          compiler_package: mingw-w64-x86_64-gcc
+          nm_tool: nm
+          object_package: mingw-w64-x86_64-binutils
+          object_tool: objdump
+          lld_package: ''
     steps:
     - name: Resolve V revision
       id: v
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/v HEAD).Split()[0]
+        $revision = '${{ needs.resolve-ucrt64-revisions.outputs.v_revision }}'
+        if ($revision -notmatch '^[0-9a-f]{40}$') {
+          throw "V revision is not an exact 40-hex SHA: $revision"
+        }
+        Write-Host "V revision: $revision"
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore V compiler cache
       id: restore-v-cache
@@ -709,7 +1043,7 @@ jobs:
           }
           git init v
           Assert-NativeCommand "git init failed"
-          git -C v remote add origin https://github.com/vlang/v
+          git -C v remote add origin '${{ env.V_REPOSITORY }}'
           Assert-NativeCommand "git remote add failed"
           git -C v fetch --depth 1 origin $expectedRevision
           Assert-NativeCommand "git fetch failed"
@@ -727,12 +1061,19 @@ jobs:
         $version = ( & .\v\v.exe version).Trim()
         $revision = ( & git -C v rev-parse HEAD).Trim()
         Assert-NativeCommand "Could not inspect V revision"
+        if ($revision -ne $expectedRevision) {
+          throw "Installed V revision $revision does not match expected $expectedRevision"
+        }
+        Write-Host "Resolved V revision: $revision"
         "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
-    - name: Log V version
-      run: v version
+    - name: Log V version and revision
+      shell: pwsh
+      run: |
+        v version
+        git -C v rev-parse HEAD
     - name: Save V compiler cache
-      if: ${{ steps.restore-v-cache.outputs.cache-hit != 'true' }}
+      if: ${{ matrix.lane == 'ucrt64-gcc' && steps.restore-v-cache.outputs.cache-hit != 'true' }}
       uses: actions/cache/save@v4
       with:
         path: v
@@ -742,41 +1083,101 @@ jobs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $revision = (git ls-remote https://github.com/vlang/vglyph HEAD).Split()[0]
-        if ($LASTEXITCODE -ne 0) {
-          throw "Could not resolve vglyph revision"
+        $revision = '${{ needs.resolve-ucrt64-revisions.outputs.vglyph_revision }}'
+        if ($revision -notmatch '^[0-9a-f]{40}$') {
+          throw "vglyph revision is not an exact 40-hex SHA: $revision"
         }
+        Write-Host "vglyph revision: $revision"
         "revision=$revision" | Add-Content -Path $env:GITHUB_OUTPUT
     - name: Restore V module cache
       uses: actions/cache@v4
       with:
-        path: ~/.vmodules/vglyph
+        path: ${{ github.workspace }}\.vmodules\vglyph
         key: windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-${{ steps.vglyph.outputs.revision }}-v2
         restore-keys: |
           windows-vmodules-vglyph-${{ steps.install-v.outputs.revision }}-
           windows-vmodules-vglyph-
-    - name: Install MSYS2 MinGW dependencies
+    - name: Install selected MSYS2 dependencies
+      id: msys2
       uses: msys2/setup-msys2@v2
       with:
-        msystem: MINGW64
+        msystem: ${{ matrix.msystem }}
         update: true
-        path-type: inherit
+        cache: false
+        path-type: minimal
         install: >-
-          mingw-w64-x86_64-gcc
-          mingw-w64-x86_64-pkgconf
-          mingw-w64-x86_64-pango
-          mingw-w64-x86_64-freetype
-    - name: Verify V version in MSYS2
+          git
+          ${{ matrix.compiler_package }}
+          ${{ matrix.object_package }}
+          ${{ matrix.lld_package }}
+          ${{ matrix.dependency_prefix }}-pkgconf
+          python
+          ${{ matrix.dependency_prefix }}-pango
+          ${{ matrix.dependency_prefix }}-freetype
+          ${{ matrix.dependency_prefix }}-gettext-runtime
+          ${{ matrix.dependency_prefix }}-libiconv
+    - name: Verify V and compiler versions in MSYS2
       shell: msys2 {0}
       run: |
-        v_version="$(v version)"
-        echo "$v_version"
+        set -euo pipefail
+        cc='${{ matrix.cc }}'
+        cxx='${{ matrix.cxx }}'
+        cc_exe="$(realpath "$(command -v "${cc}.exe")")"
+        cxx_exe="$(realpath "$(command -v "${cxx}.exe")")"
+        export PATH="$PWD/v:$PATH"
+        if [ "$MSYSTEM" != '${{ matrix.msystem }}' ]; then
+          echo "Expected ${{ matrix.msystem }}, got $MSYSTEM" >&2
+          exit 1
+        fi
+        v version
+        command -v "$cc"
+        command -v "$cxx"
+        test -f "$cc_exe" && test -x "$cc_exe"
+        test -f "$cxx_exe" && test -x "$cxx_exe"
+        case "$cc_exe:$cxx_exe" in
+          "$MINGW_PREFIX"/bin/*.exe:"$MINGW_PREFIX"/bin/*.exe) ;;
+          *) echo "Compiler pair escaped $MINGW_PREFIX/bin: $cc_exe / $cxx_exe" >&2; exit 1 ;;
+        esac
+        command -v pkgconf
+        command -v pkg-config
+        "$cc" --version
+        "$cxx" --version
+        pkgconf --version
+        pkg-config --version
+        for tool in "$cc" "$cxx" pkgconf pkg-config ld '${{ matrix.nm_tool }}' '${{ matrix.object_tool }}'; do
+          case "$(command -v "$tool")" in
+            "$MINGW_PREFIX"/bin/*) ;;
+            *)
+              echo "$tool did not resolve inside $MSYSTEM: $(command -v "$tool")" >&2
+              exit 1
+              ;;
+          esac
+        done
+        if [[ -n '${{ matrix.lld_package }}' ]]; then
+          pacman -Q '${{ matrix.lld_package }}'
+          lld_path="$(command -v ld.lld.exe)"
+          case "$lld_path" in
+            "$MINGW_PREFIX"/bin/*) ;;
+            *) echo "LLD escaped $MINGW_PREFIX/bin: $lld_path" >&2; exit 1 ;;
+          esac
+          test -f "$lld_path" && test -x "$lld_path"
+          clang_version="$("$cc_exe" --version 2>&1)"
+          clang_version_num="$(sed -n 's/.*clang version \([^[:space:]]*\).*/\1/p' <<< "$clang_version" | head -n 1)"
+          lld_version="$("$lld_path" --version 2>&1)"
+          lld_version_num="$(sed -n 's/^LLD \([^[:space:]]*\).*/\1/p' <<< "$lld_version" | head -n 1)"
+          [[ -n "$clang_version_num" && "$lld_version_num" == "$clang_version_num" ]]
+          lld_route="$(printf '' | "$cc_exe" -### -fuse-ld=lld -x c - -o NUL 2>&1)"
+          printf '%s\n' "$lld_version" "$lld_route"
+          grep -Eiq '[/\\]ld\.lld(\.exe)?' <<< "$lld_route"
+        fi
     - name: Ensure vglyph revision
       shell: msys2 {0}
       run: |
-        set -e
+        set -euo pipefail
         expected_revision='${{ steps.vglyph.outputs.revision }}'
-        vglyph_path="$HOME/.vmodules/vglyph"
+        vmodules_posix="$PWD/.vmodules"
+        export VMODULES="$(cygpath -w "$vmodules_posix")"
+        vglyph_path="$vmodules_posix/vglyph"
         if [ -d "$vglyph_path/.git" ]; then
           cached_revision=$(git -C "$vglyph_path" rev-parse HEAD | tr -d '[:space:]')
           if [ "$cached_revision" != "$expected_revision" ]; then
@@ -789,31 +1190,280 @@ jobs:
         if [ ! -e "$vglyph_path" ]; then
           mkdir -p "$(dirname "$vglyph_path")"
           git init "$vglyph_path"
-          git -C "$vglyph_path" remote add origin https://github.com/vlang/vglyph
+          git -C "$vglyph_path" remote add origin '${{ env.VGLYPH_REPOSITORY }}'
           git -C "$vglyph_path" fetch --depth 1 origin "$expected_revision"
           git -C "$vglyph_path" checkout --detach FETCH_HEAD
         fi
+        test -f "$vglyph_path/v.mod"
+        resolved_revision="$(git -C "$vglyph_path" rev-parse HEAD | tr -d '[:space:]')"
+        test "$resolved_revision" = "$expected_revision"
+        printf 'VMODULES=%s\n' "$VMODULES"
+        printf 'Resolved vglyph revision: %s\n' "$resolved_revision"
     - name: Checkout gui
       uses: actions/checkout@v4
       with:
         path: gui
+    - name: Validate native V module resolution
+      shell: msys2 {0}
+      run: |
+        set -euo pipefail
+        vmodules_posix="$PWD/.vmodules"
+        export VMODULES="$(cygpath -w "$vmodules_posix")"
+        test -f "$vmodules_posix/vglyph/v.mod"
+        ./v/v.exe -check gui/.github/workflows/issue74/vglyph_probe.v
+    - name: Restore standalone V3 cache
+      id: restore-v3
+      uses: actions/cache/restore@v4
+      with:
+        path: ${{ runner.temp }}\v3-gui-${{ matrix.lane }}.exe
+        key: windows-v3-${{ env.V_REVISION }}-${{ matrix.lane }}-schema1
+    - name: Build and validate standalone V3
+      shell: msys2 {0}
+      run: |
+        set -euo pipefail
+        unset VFLAGS CFLAGS LDFLAGS
+        vroot="$PWD/v"
+        runner_temp_posix="$(cygpath -u "$RUNNER_TEMP")"
+        cached_v3="$runner_temp_posix/v3-gui-${{ matrix.lane }}.exe"
+        v3="$vroot/v3-gui-${{ matrix.lane }}.exe"
+        state="$runner_temp_posix/v3-gui-${{ matrix.lane }}"
+        rm -rf "$state"
+        mkdir -p "$state/vmodules" "$state/vcache" "$state/v3cache" "$state/vtmp"
+        vlib_path="$(cygpath -w "$vroot/vlib")|@vlib|@vmodules"
+        cc_exe="$(realpath "$(command -v '${{ matrix.cc }}.exe')")"
+        cxx_exe="$(realpath "$(command -v '${{ matrix.cxx }}.exe')")"
+        test -f "$cc_exe" && test -x "$cc_exe"
+        test -f "$cxx_exe" && test -x "$cxx_exe"
+        case "$cc_exe:$cxx_exe" in
+          "$MINGW_PREFIX"/bin/*.exe:"$MINGW_PREFIX"/bin/*.exe) ;;
+          *) echo "Compiler pair escaped $MINGW_PREFIX/bin: $cc_exe / $cxx_exe" >&2; exit 1 ;;
+        esac
+        cc_windows="$(cygpath -w "$cc_exe")"
+        cxx_windows="$(cygpath -w "$cxx_exe")"
+        if [ -f "$cached_v3" ]; then
+          test ! -L "$cached_v3"
+          cp "$cached_v3" "$v3"
+        else
+          ./v/v.exe -old-compiler -gc none -path "$vlib_path" \
+            -cc "$cc_windows" -c++ "$cxx_windows" \
+            -no-retry-compilation -o "$(cygpath -w "$v3")" \
+            "$(cygpath -w "$vroot/vlib/v3/v3.v")"
+          cp "$v3" "$cached_v3"
+        fi
+        test -x "$v3"
+        printf '%s\n' 'module main' "fn main() { println('v3-gui-ok') }" > "$state/canary.v"
+        VMODULES="$(cygpath -w "$state/vmodules")" \
+          VCACHE="$(cygpath -w "$state/vcache")" \
+          V3CACHE="$(cygpath -w "$state/v3cache")" \
+          VTMP="$(cygpath -w "$state/vtmp")" \
+          "$v3" -gc none -no-parallel -path "$vlib_path" \
+            -cc "$cc_windows" -c++ "$cxx_windows" \
+            -o "$(cygpath -w "$state/canary.exe")" "$(cygpath -w "$state/canary.v")"
+        test "$("$state/canary.exe")" = v3-gui-ok
+        echo "V3_GNU_STANDALONE=$(cygpath -w "$v3")" >> "$GITHUB_ENV"
+    - name: Save standalone V3 cache
+      if: ${{ steps.restore-v3.outputs.cache-hit != 'true' }}
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}\v3-gui-${{ matrix.lane }}.exe
+        key: ${{ steps.restore-v3.outputs.cache-primary-key }}
+    - name: "Run issue #74 WinGNU static-link diagnostics"
+      id: issue74
+      continue-on-error: true
+      shell: msys2 {0}
+      env:
+        MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        ISSUE74_NM: ${{ matrix.nm_tool }}
+        ISSUE74_OBJDUMP: ${{ matrix.object_tool }}
+      run: >-
+        bash gui/.github/workflows/issue74/run_ucrt64_static_diagnostics.sh
+        '${{ matrix.cc }}' ./v/v.exe gui issue74-artifacts '${{ matrix.lane }}'
+    - name: Finalize bounded issue #74 evidence
+      id: finalize_issue74
+      if: ${{ always() }}
+      continue-on-error: true
+      shell: msys2 {0}
+      run: |
+        set -euo pipefail
+        root="issue74-artifacts/${{ matrix.cc }}"
+        test -d "$root" && test ! -L "$root"
+        python_exe="$(command -v python3)"
+        python_real="$(realpath "$python_exe")"
+        case "$python_exe:$python_real" in /usr/bin/python3:/usr/bin/python*) ;; *) exit 1 ;; esac
+        "$python_exe" --version
+        validate_wer_leaf() {
+          local leaf="$1"
+          local suffix
+          case "$leaf" in *[!A-Za-z0-9._-]*) return 1 ;; esac
+          case "$leaf" in [0-9][0-9][0-9]_*) ;; *) return 1 ;; esac
+          suffix="${leaf#????}"
+          test -n "$suffix"
+        }
+        manifest_tmp="$(cygpath -u "$RUNNER_TEMP")/issue74-${{ matrix.lane }}-manifest.tmp"
+        manifest="$root/manifest.sha256.tsv"
+        meta="$root/manifest.meta"
+        scan_artifacts() {
+          local output_manifest="$1"
+          local count=0
+          local bytes=0
+          local file relative size sha directory leaf wer_tail wer_leaf wer_payload
+          : > "$output_manifest"
+          if find "$root" -mindepth 1 -type l -print -quit | grep -q .; then
+            echo 'Artifact tree contains a symlink' >&2; return 1
+          fi
+          if find "$root" -mindepth 1 ! -type f ! -type d -print -quit | grep -q .; then
+            echo 'Artifact tree contains a non-regular object' >&2; return 1
+          fi
+          while IFS= read -r directory; do
+            relative="${directory#"$root"/}"
+            case "$relative" in
+              logs|bin|pe|pkgconfig|pkgconfig/lib|pkgconfig/share|generated|probes|windows|windows/event-logs|windows/wer) ;;
+              windows/wer/[0-9][0-9][0-9]_*)
+                leaf="${relative#windows/wer/}"
+                case "$leaf" in */*) echo "Nested WER artifact directory: $relative" >&2; return 1 ;; esac
+                validate_wer_leaf "$leaf" || { echo "Invalid WER report component: $leaf" >&2; return 1; } ;;
+              *) echo "Unknown artifact directory: $relative" >&2; return 1 ;;
+            esac
+          done < <(find "$root" -mindepth 1 -type d | LC_ALL=C sort)
+          while IFS= read -r -d '' file; do
+            test -f "$file" && test ! -L "$file"
+            relative="${file#"$root"/}"
+            case "$relative" in
+              windows/wer/*/*)
+                wer_tail="${relative#windows/wer/}"
+                wer_leaf="${wer_tail%%/*}"
+                wer_payload="${wer_tail#*/}"
+                validate_wer_leaf "$wer_leaf" || { echo "Invalid WER report component: $wer_leaf" >&2; return 1; }
+                case "$wer_payload" in */*|'') echo "Invalid WER payload depth: $relative" >&2; return 1 ;; esac
+                case "$wer_payload" in Report.wer|*.xml|*.txt) ;; *) echo "Invalid WER payload: $relative" >&2; return 1 ;; esac
+                ;;
+            esac
+            case "$relative" in
+              *.dmp|*/*/*/*/*) echo "Rejected artifact: $relative" >&2; return 1 ;;
+              logs/*|bin/*|pe/*|pkgconfig/lib/*.pc|pkgconfig/share/*.pc|pkgconfig/*.txt|generated/*|probes/*|windows/collection.txt|windows/status.txt|windows/event-logs/Application.txt|windows/event-logs/Microsoft-Windows-Windows_Defender_Operational.txt|windows/event-logs/Microsoft-Windows-CodeIntegrity_Operational.txt|windows/wer/manifest.txt|windows/wer/*/*|results.tsv|results-contract.txt|summary.md|environment.txt|.diagnostic-start) ;;
+              *) echo "Unknown artifact: $relative" >&2; return 1 ;;
+            esac
+            size="$(stat -c '%s' "$file")"
+            test "$size" -le 8388608
+            sha="$(sha256sum "$file" | cut -d' ' -f1)"
+            printf '%s\t%s\t%s\n' "$relative" "$size" "$sha" >> "$output_manifest"
+            count=$((count + 1)); bytes=$((bytes + size))
+          done < <(find "$root" -mindepth 1 -type f -print0)
+          test "$count" -gt 0 && test "$bytes" -le 67108864
+          scan_count="$count"
+          scan_bytes="$bytes"
+        }
+
+        # Reject unsafe inputs before invoking any evidence parser.
+        scan_artifacts "$manifest_tmp"
+        evidence_rc=0
+        contract_rc=0
+        "$python_exe" gui/.github/workflows/issue74/verify_results.py \
+          "$root/results.tsv" '${{ matrix.cc }}' "$root/results-contract.txt" || contract_rc=$?
+        if [ "$contract_rc" -ne 0 ]; then
+          evidence_rc=1
+        fi
+        if [ ! -f "$root/results-contract.txt" ]; then
+          printf 'expected=unknown\nactual=unknown\ncomplete=false\nerror=verifier-exit-%s\n' \
+            "$contract_rc" > "$root/results-contract.txt"
+          evidence_rc=1
+        fi
+        event_root="$root/windows/event-logs"
+        wer_manifest="$root/windows/wer/manifest.txt"
+        event_log_files=0
+        query_errors=0
+        wer_count=unknown
+        if [ -d "$event_root" ] && [ ! -L "$event_root" ] && [ -f "$wer_manifest" ]; then
+          event_log_files="$(find "$event_root" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+          if [ "$event_log_files" -ne 3 ] || [ "$(grep -c '^matching_report_count=[0-9][0-9]*$' "$wer_manifest" || true)" -ne 1 ]; then
+            evidence_rc=1
+          fi
+          wer_count="$(sed -n 's/^matching_report_count=//p' "$wer_manifest")"
+          [ -n "$wer_count" ] || { wer_count=unknown; evidence_rc=1; }
+        else
+          evidence_rc=1
+        fi
+        if [ -d "$root/windows" ]; then
+          query_errors="$( { grep -RhE 'Event log query failed:|root_query_failed=|report_read_failed=' \
+            "$root/windows" 2>/dev/null || true; } | awk 'END {print NR + 0}')"
+        else
+          mkdir -p "$root/windows"
+          evidence_rc=1
+        fi
+        printf 'event_log_files=%s\nquery_errors=%s\nwer_count=%s\n' \
+          "$event_log_files" "$query_errors" "$wer_count" > "$root/windows/status.txt"
+
+        # Re-scan all raw and derived evidence, then mark it safe for upload.
+        scan_artifacts "$manifest_tmp"
+        LC_ALL=C sort "$manifest_tmp" > "$manifest"
+        rm "$manifest_tmp"
+        manifest_sha="$(sha256sum "$manifest" | cut -d' ' -f1)"
+        expected_results="$(sed -n 's/^expected=//p' "$root/results-contract.txt")"
+        actual_results="$(sed -n 's/^actual=//p' "$root/results-contract.txt")"
+        [ -n "$expected_results" ] || { expected_results=unknown; evidence_rc=1; }
+        [ -n "$actual_results" ] || { actual_results=unknown; evidence_rc=1; }
+        if [ ! -s "$root/results.tsv" ] || [ ! -s "$root/summary.md" ]; then
+          evidence_rc=1
+        fi
+        evidence_complete=false
+        [ "$evidence_rc" -eq 0 ] && evidence_complete=true
+        printf 'artifact_safe=true\nevidence_complete=%s\nfiles=%s\nbytes=%s\nmanifest_sha256=%s\nexpected_results=%s\nactual_results=%s\nwer_query_errors=%s\ncontract_exit_code=%s\n' \
+          "$evidence_complete" "$scan_count" "$scan_bytes" "$manifest_sha" "$expected_results" "$actual_results" "$query_errors" "$contract_rc" > "$meta"
+        manifest_size="$(stat -c '%s' "$manifest")"
+        meta_size="$(stat -c '%s' "$meta")"
+        test "$manifest_size" -le 8388608 && test "$meta_size" -le 8388608
+        test $((scan_bytes + manifest_size + meta_size)) -le 67108864
+        github_output="$(cygpath -u "$GITHUB_OUTPUT")"
+        echo 'artifact_safe=true' >> "$github_output"
+        exit "$evidence_rc"
+    - name: "Upload issue #74 diagnostic artifacts"
+      id: upload_issue74
+      if: ${{ always() && steps.finalize_issue74.outputs.artifact_safe == 'true' }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: issue74-${{ matrix.lane }}-${{ github.run_attempt }}
+        path: issue74-artifacts/${{ matrix.cc }}
+        if-no-files-found: error
+        retention-days: 90
+    - name: "Enforce issue #74 required diagnostics"
+      if: ${{ always() }}
+      shell: msys2 {0}
+      run: |
+        if [ '${{ steps.issue74.outcome }}' != success ]; then
+          echo "Required issue #74 diagnostics failed for ${{ matrix.cc }}." >&2
+          exit 1
+        fi
+        if [ '${{ steps.finalize_issue74.outcome }}' != success ]; then
+          echo "Issue #74 evidence finalizer failed for ${{ matrix.lane }}." >&2
+          exit 1
+        fi
+        if [ '${{ steps.upload_issue74.outcome }}' != success ]; then
+          echo "Issue #74 artifact upload failed for ${{ matrix.lane }}." >&2
+          exit 1
+        fi
     - name: Run Windows setup preflight
       shell: msys2 {0}
       env:
-        GUI_WINDOWS_PREFLIGHT_CC: gcc
-      run: v run gui/_windows_preflight.vsh
+        GUI_WINDOWS_PREFLIGHT_CC: ${{ matrix.cc }}
+      run: |
+        export PATH="$PWD/v:$PATH"
+        v run gui/_windows_preflight.vsh
     - name: Run noninteractive native tests
-      shell: msys2 {0}
-      run: >
-        v -no-parallel -cc gcc test
-        gui/_native_dialog_test.v
-        gui/_native_print_test.v
-        gui/_native_notification_test.v
-        gui/nativebridge/_bridge_ex_test.v
-        gui/nativebridge/_readback_abi_test.v
-    - name: Compile native smoke examples
+      if: ${{ matrix.cc == 'gcc' }}
       shell: msys2 {0}
       run: |
+        export PATH="$PWD/v:$PATH"
+        v -no-parallel -cc gcc test \
+          gui/_native_dialog_test.v \
+          gui/_native_print_test.v \
+          gui/_native_notification_test.v \
+          gui/nativebridge/_bridge_ex_test.v \
+          gui/nativebridge/_readback_abi_test.v
+    - name: Compile native smoke examples
+      if: ${{ matrix.cc == 'gcc' }}
+      shell: msys2 {0}
+      run: |
+        export PATH="$PWD/v:$PATH"
         v -no-parallel -cc gcc -W -o dialogs_smoke.exe gui/examples/dialogs.v
         v -no-parallel -cc gcc -W -o printing_smoke.exe gui/examples/printing.v
         v -no-parallel -cc gcc -W -o notification_smoke.exe gui/examples/native_notification.v
