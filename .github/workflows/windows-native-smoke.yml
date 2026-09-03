@@ -1078,12 +1078,12 @@ jobs:
           }
         }
         function Write-CFunctionSnippet([string[]]$Lines, [string]$Pattern, [string]$Label) {
-          $matches = @()
+          $matchIndexes = @()
           for ($lineIndex = 0; $lineIndex -lt $Lines.Count; $lineIndex++) {
-            if ($Lines[$lineIndex] -match $Pattern) { $matches += $lineIndex }
+            if ($Lines[$lineIndex] -match $Pattern) { $matchIndexes += $lineIndex }
           }
-          Write-Host "ISSUE74_C_MATCH label=$Label count=$($matches.Count)"
-          foreach ($matchIndex in @($matches | Select-Object -First 2)) {
+          Write-Host "ISSUE74_C_MATCH label=$Label count=$($matchIndexes.Count)"
+          foreach ($matchIndex in @($matchIndexes | Select-Object -First 2)) {
             $lastIndex = [Math]::Min($Lines.Count - 1, $matchIndex + 11)
             for ($lineIndex = $matchIndex; $lineIndex -le $lastIndex; $lineIndex++) {
               $text = [string]$Lines[$lineIndex]
@@ -1092,47 +1092,49 @@ jobs:
             }
           }
         }
-
-        $llvmReady = $false
-        $clangItem = $null
-        $readobjItem = $null
-        try {
-          $clangCommand = Get-Command clang.exe -CommandType Application -ErrorAction Stop
-          $readobjCommand = Get-Command llvm-readobj.exe -CommandType Application -ErrorAction Stop
-          $clangItem = Get-Item -LiteralPath $clangCommand.Source -Force
-          $readobjItem = Get-Item -LiteralPath $readobjCommand.Source -Force
-          $llvmBin = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'LLVM\bin')).TrimEnd('\')
-          foreach ($toolItem in @($clangItem, $readobjItem)) {
-            if (-not ($toolItem -is [IO.FileInfo]) -or
-                ($toolItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                -not [string]::Equals([IO.Path]::GetFullPath($toolItem.DirectoryName).TrimEnd('\'), $llvmBin, [StringComparison]::OrdinalIgnoreCase)) {
-              throw "LLVM diagnostic tool escaped canonical LLVM bin: $($toolItem.FullName)"
+        function Get-LlvmDiagnosticTools() {
+          try {
+            $clangCommand = Get-Command clang.exe -CommandType Application -ErrorAction Stop
+            $readobjCommand = Get-Command llvm-readobj.exe -CommandType Application -ErrorAction Stop
+            $clangItem = Get-Item -LiteralPath $clangCommand.Source -Force
+            $readobjItem = Get-Item -LiteralPath $readobjCommand.Source -Force
+            $llvmBin = [IO.Path]::GetFullPath((Join-Path $env:ProgramFiles 'LLVM\bin')).TrimEnd('\')
+            foreach ($toolItem in @($clangItem, $readobjItem)) {
+              if (-not ($toolItem -is [IO.FileInfo]) -or
+                  ($toolItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+                  -not [string]::Equals([IO.Path]::GetFullPath($toolItem.DirectoryName).TrimEnd('\'), $llvmBin, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "LLVM diagnostic tool escaped canonical LLVM bin: $($toolItem.FullName)"
+              }
             }
+            $clangVersion = @(& $clangItem.FullName --version 2>&1)
+            $clangVersionRc = $LASTEXITCODE
+            $readobjVersion = @(& $readobjItem.FullName --version 2>&1)
+            $readobjVersionRc = $LASTEXITCODE
+            $clangTarget = @(& $clangItem.FullName -dumpmachine 2>&1)
+            $clangTargetRc = $LASTEXITCODE
+            $clangText = $clangVersion -join "`n"
+            $readobjText = $readobjVersion -join "`n"
+            if ($clangVersionRc -ne 0 -or $readobjVersionRc -ne 0 -or $clangTargetRc -ne 0 -or
+                $clangText -notmatch '(?m)^\s*clang version ([0-9]+)\.' -or
+                $readobjText -notmatch '(?m)^\s*LLVM version ([0-9]+)\.') {
+              throw 'LLVM diagnostic provenance failed'
+            }
+            $clangMajor = [int]([regex]::Match($clangText, '(?m)^\s*clang version ([0-9]+)\.').Groups[1].Value)
+            $readobjMajor = [int]([regex]::Match($readobjText, '(?m)^\s*LLVM version ([0-9]+)\.').Groups[1].Value)
+            $targetText = ($clangTarget -join '').Trim()
+            if ($clangMajor -ne $readobjMajor -or $targetText -notmatch '^(x86_64|amd64)-.*windows') {
+              throw "LLVM version or target mismatch: clang=$clangMajor readobj=$readobjMajor target=$targetText"
+            }
+            Write-Host "ISSUE74_LLVM clang=$($clangItem.FullName) readobj=$($readobjItem.FullName) major=$clangMajor target=$targetText"
+            return @{ Clang = $clangItem; Readobj = $readobjItem }
+          } catch {
+            Write-Warning "LLVM diagnostic provenance unavailable: $($_.Exception.Message)"
+            return $null
           }
-          $clangVersion = @(& $clangItem.FullName --version 2>&1)
-          $clangVersionRc = $LASTEXITCODE
-          $readobjVersion = @(& $readobjItem.FullName --version 2>&1)
-          $readobjVersionRc = $LASTEXITCODE
-          $clangTarget = @(& $clangItem.FullName -dumpmachine 2>&1)
-          $clangTargetRc = $LASTEXITCODE
-          $clangText = $clangVersion -join "`n"
-          $readobjText = $readobjVersion -join "`n"
-          if ($clangVersionRc -ne 0 -or $readobjVersionRc -ne 0 -or $clangTargetRc -ne 0 -or
-              $clangText -notmatch '(?m)^\s*clang version ([0-9]+)\.' -or
-              $readobjText -notmatch '(?m)^\s*LLVM version ([0-9]+)\.') {
-            throw 'LLVM diagnostic provenance failed'
-          }
-          $clangMajor = [int]([regex]::Match($clangText, '(?m)^\s*clang version ([0-9]+)\.').Groups[1].Value)
-          $readobjMajor = [int]([regex]::Match($readobjText, '(?m)^\s*LLVM version ([0-9]+)\.').Groups[1].Value)
-          $targetText = ($clangTarget -join '').Trim()
-          if ($clangMajor -ne $readobjMajor -or $targetText -notmatch '^(x86_64|amd64)-.*windows') {
-            throw "LLVM version or target mismatch: clang=$clangMajor readobj=$readobjMajor target=$targetText"
-          }
-          Write-Host "ISSUE74_LLVM clang=$($clangItem.FullName) readobj=$($readobjItem.FullName) major=$clangMajor target=$targetText"
-          $llvmReady = $true
-        } catch {
-          Write-Warning "LLVM diagnostic provenance unavailable: $($_.Exception.Message)"
         }
+
+        $llvmAttempted = $false
+        $llvmTools = $null
 
         $generations = @(
           @{ Name = 'v1'; Args = @('-old-compiler') }
@@ -1160,7 +1162,7 @@ jobs:
               $diagStdout = Join-Path $ownerTempItem.FullName 'diagnostic.stdout.txt'
               $diagStderr = Join-Path $ownerTempItem.FullName 'diagnostic.stderr.txt'
               $compilerArgs = @($generation.Args)
-              & v @compilerArgs -no-parallel -cc clang -no-retry-compilation -showcc -keepc -o $ownerExe -test-runner dump -run-only $probe.Function $probe.File 1> $diagStdout 2> $diagStderr
+              & v @compilerArgs -no-parallel -cc clang -no-retry-compilation -showcc -keepc -o $ownerExe -test-runner dump -run-only $probe.Function run $probe.File 1> $diagStdout 2> $diagStderr
               $diagnosticRc = $LASTEXITCODE
               $stdoutLines = @(Write-BoundedDiagnostic $diagStdout "$key-stdout")
               $stderrLines = @(Write-BoundedDiagnostic $diagStderr "$key-stderr")
@@ -1193,35 +1195,43 @@ jobs:
                 Write-Warning "ISSUE74_MARKER_CONTRACT generation=$($generation.Name) probe=$($probe.Name) expected_tests=$($probe.Expected) failed"
               }
 
-              $generated = @(Get-ChildItem -LiteralPath $ownerTempItem.FullName -Recurse -File -Force)
-              if (@($generated | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -ne 0) {
-                throw "Generated diagnostic tree contains a reparse point"
-              }
-              $cFiles = @($generated | Where-Object { $_.Extension -ceq '.c' })
-              if ($cFiles.Count -ne 1 -or $cFiles[0].Length -le 0 -or $cFiles[0].Length -gt 8388608) {
-                throw "Expected exactly one bounded generated C file, found $($cFiles.Count)"
-              }
-              $cLines = @(Get-Content -LiteralPath $cFiles[0].FullName -ErrorAction Stop)
-              Write-Host "ISSUE74_C_PATH key=$key path=$($cFiles[0].FullName) bytes=$($cFiles[0].Length)"
-              Write-CFunctionSnippet $cLines '^\s*(?:int|void)\s+(?:wWinMain|wmain|main)\s*\([^;]*\)\s*\{' "$key-main"
-              Write-CFunctionSnippet $cLines '^\s*(?:static\s+)?void\s+_vcleanup\s*\(void\)\s*\{' "$key-cleanup"
-              if (-not [string]::IsNullOrEmpty([string]$probe.CName)) {
-                $selectedPattern = '^\s*(?:void|int)\s+' + [regex]::Escape([string]$probe.CName) + '\s*\([^;]*\)\s*\{'
-                Write-CFunctionSnippet $cLines $selectedPattern "$key-selected"
+              $peReady = $false
+              try {
+                $cFiles = @(Get-ChildItem -LiteralPath $ownerTempItem.FullName -Recurse -File -Force | Where-Object { $_.Extension -ceq '.c' })
+                if (@($cFiles | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -ne 0 -or
+                    $cFiles.Count -ne 1 -or $cFiles[0].Length -le 0 -or $cFiles[0].Length -gt 8388608) {
+                  throw "Expected exactly one bounded generated C file, found $($cFiles.Count)"
+                }
+                $cLines = @(Get-Content -LiteralPath $cFiles[0].FullName -ErrorAction Stop)
+                Write-Host "ISSUE74_C_PATH key=$key path=$($cFiles[0].FullName) bytes=$($cFiles[0].Length)"
+                Write-CFunctionSnippet $cLines '^\s*int\s+(?:WINAPI\s+)?(?:wWinMain|wmain|main)\s*\([^;{}]*\)\s*\{\s*$' "$key-main"
+                Write-CFunctionSnippet $cLines '^\s*_vtrunner\._method_start\(_vtobj,\s*[0-9]+\);\s*$' "$key-dump-start"
+                Write-CFunctionSnippet $cLines '^\s*(?:static\s+)?void\s+_vcleanup\s*\(void\)\s*\{' "$key-cleanup"
+                if (-not [string]::IsNullOrEmpty([string]$probe.CName)) {
+                  $selectedPattern = '^\s*(?:void|int)\s+' + [regex]::Escape([string]$probe.CName) + '\s*\([^;]*\)\s*\{'
+                  Write-CFunctionSnippet $cLines $selectedPattern "$key-selected"
+                }
+              } catch {
+                Write-Warning "ISSUE74_C_COLLECTION key=$key warning=$($_.Exception.Message)"
               }
 
-              $unexpectedPe = @($generated | Where-Object { $_.Extension -ceq '.exe' -and -not [string]::Equals($_.FullName, $ownerExe, [StringComparison]::OrdinalIgnoreCase) })
-              if ($unexpectedPe.Count -ne 0) { throw "Unexpected PE paths: $($unexpectedPe.FullName -join '; ')" }
-              $peReady = $false
-              if (Test-Path -LiteralPath $ownerExe) {
-                $ownerExeItem = Get-Item -LiteralPath $ownerExe -Force
-                if (-not ($ownerExeItem -is [IO.FileInfo]) -or ($ownerExeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
-                    $ownerExeItem.Length -le 0 -or $ownerExeItem.Length -gt 67108864) {
-                  throw "Owner PE is not a bounded real file: $ownerExe"
+              try {
+                $peFiles = @(Get-ChildItem -LiteralPath $ownerTempItem.FullName -Recurse -File -Force | Where-Object { $_.Extension -ceq '.exe' })
+                if (@($peFiles | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 }).Count -ne 0) {
+                  throw "Generated PE tree contains a reparse point"
                 }
+                $unexpectedPe = @($peFiles | Where-Object { -not [string]::Equals($_.FullName, $ownerExe, [StringComparison]::OrdinalIgnoreCase) })
+                if ($unexpectedPe.Count -ne 0) { throw "Unexpected PE paths: $($unexpectedPe.FullName -join '; ')" }
+                if ($peFiles.Count -ne 1) { throw "Expected exact owner PE, found $($peFiles.Count)" }
+                $ownerExeItem = $peFiles[0]
+                if ($ownerExeItem.Length -le 0 -or $ownerExeItem.Length -gt 67108864) { throw "Owner PE is not bounded: $ownerExe" }
                 $peReady = $true
-                if ($llvmReady) {
-                  $peOutput = @(& $readobjItem.FullName --file-headers --coff-imports $ownerExeItem.FullName 2>&1)
+                if (-not $llvmAttempted) {
+                  $llvmAttempted = $true
+                  $llvmTools = Get-LlvmDiagnosticTools
+                }
+                if ($null -ne $llvmTools) {
+                  $peOutput = @(& $llvmTools.Readobj.FullName --file-headers --coff-imports $ownerExeItem.FullName 2>&1)
                   $peRc = $LASTEXITCODE
                   $peEvidence = @($peOutput | Where-Object { $_ -match '^\s*(Machine|Subsystem|Name):' } | Select-Object -First 256)
                   Write-Host "ISSUE74_PE key=$key path=$($ownerExeItem.FullName) bytes=$($ownerExeItem.Length) rc=$peRc evidence=$($peEvidence.Count)"
@@ -1230,8 +1240,8 @@ jobs:
                 } else {
                   Write-Warning "LLVM PE inspection unavailable for $key"
                 }
-              } else {
-                Write-Warning "Owner PE absent for $key"
+              } catch {
+                Write-Warning "ISSUE74_PE_COLLECTION key=$key warning=$($_.Exception.Message)"
               }
               $observations[$key] = @{ Rc = $diagnosticRc; Hex = (Format-RcHex $diagnosticRc); Start = $startLines.Count; FnStart = $fnStartLines.Count; FnPass = $fnPassLines.Count; FnFail = $fnFailLines.Count; Finish = $finishLines.Count; ExitCode = $exitLines.Count; Contract = $markerContract; Pe = $peReady }
             } catch {
@@ -1242,28 +1252,28 @@ jobs:
         }
 
         foreach ($generation in $generations) {
-          $empty = $observations["$($generation.Name)-empty"]
-          $selected = $observations["$($generation.Name)-selected"]
-          if ($null -ne $empty -and $null -ne $selected -and
-              $empty.Contract -eq $true -and $selected.FnStart -eq 1 -and $selected.FnPass -eq 1 -and
-              $selected.Finish -eq 0 -and $selected.ExitCode -eq 0 -and
-              $selected.Hex -ceq '0xC0000409') {
+          foreach ($probe in @($probes | Where-Object { $_.Name -in @('empty', 'selected') })) {
+            $observation = $observations["$($generation.Name)-$($probe.Name)"]
+            if ($null -eq $observation -or $observation.Hex -cne '0xC0000409') {
+              continue
+            }
             try {
-              $gcTemp = Join-Path $env:RUNNER_TEMP "issue74-host-clang-$($generation.Name)-selected-gc-none"
+              $gcTemp = Join-Path $env:RUNNER_TEMP "issue74-host-clang-$($generation.Name)-$($probe.Name)-gc-none"
               if (Test-Path -LiteralPath $gcTemp) { throw "Fresh gc-none VTMP already exists: $gcTemp" }
               New-Item -ItemType Directory -Path $gcTemp | Out-Null
               $gcTempItem = Get-Item -LiteralPath $gcTemp -Force
               if (-not $gcTempItem.PSIsContainer -or ($gcTempItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "gc-none VTMP is not real" }
               $gcExe = Join-Path $gcTempItem.FullName 'owner.exe'
+              if (Test-Path -LiteralPath $gcExe) { throw "Fresh gc-none owner PE already exists: $gcExe" }
               $env:VTMP = $gcTempItem.FullName
               $gcArgs = @($generation.Args)
-              & v @gcArgs -no-parallel -cc clang -no-retry-compilation -showcc -keepc -gc none -o $gcExe -test-runner dump -run-only test_bridge_result_ex_from_legacy_ok gui/nativebridge/_bridge_ex_test.v 1> (Join-Path $gcTemp 'diagnostic.stdout.txt') 2> (Join-Path $gcTemp 'diagnostic.stderr.txt')
+              & v @gcArgs -no-parallel -cc clang -no-retry-compilation -showcc -keepc -gc none -o $gcExe -test-runner dump -run-only $probe.Function run $probe.File 1> (Join-Path $gcTemp 'diagnostic.stdout.txt') 2> (Join-Path $gcTemp 'diagnostic.stderr.txt')
               $gcRc = $LASTEXITCODE
-              Write-Host "ISSUE74_GC_NONE generation=$($generation.Name) rc=$gcRc hex=$(Format-RcHex $gcRc)"
-              [void](Write-BoundedDiagnostic (Join-Path $gcTemp 'diagnostic.stdout.txt') "$($generation.Name)-gc-none-stdout")
-              [void](Write-BoundedDiagnostic (Join-Path $gcTemp 'diagnostic.stderr.txt') "$($generation.Name)-gc-none-stderr")
+              Write-Host "ISSUE74_GC_NONE generation=$($generation.Name) probe=$($probe.Name) rc=$gcRc hex=$(Format-RcHex $gcRc)"
+              [void](Write-BoundedDiagnostic (Join-Path $gcTemp 'diagnostic.stdout.txt') "$($generation.Name)-$($probe.Name)-gc-none-stdout")
+              [void](Write-BoundedDiagnostic (Join-Path $gcTemp 'diagnostic.stderr.txt') "$($generation.Name)-$($probe.Name)-gc-none-stderr")
             } catch {
-              Write-Warning "ISSUE74_GC_NONE generation=$($generation.Name) warning=$($_.Exception.Message)"
+              Write-Warning "ISSUE74_GC_NONE generation=$($generation.Name) probe=$($probe.Name) warning=$($_.Exception.Message)"
             }
           }
         }

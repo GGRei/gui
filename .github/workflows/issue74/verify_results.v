@@ -205,6 +205,51 @@ fn ensure(condition bool, message string) ! {
 	}
 }
 
+fn normalize_cli_arguments(arguments []string) ![]string {
+	if arguments.len == 1 && arguments[0] == '--self-test' {
+		return ['verify_results', arguments[0]]
+	}
+	if arguments.len == 2 && arguments[1] == '--self-test' {
+		return arguments.clone()
+	}
+	if arguments.any(it == '--self-test') {
+		return error('usage: verify_results.v <results.tsv> <compiler> <report>')
+	}
+	if arguments.len == 3 {
+		mut normalized := ['verify_results']
+		normalized << arguments
+		return normalized
+	}
+	if arguments.len == 4 {
+		return arguments.clone()
+	}
+	return error('usage: verify_results.v <results.tsv> <compiler> <report>')
+}
+
+fn cli_normalization_fails(arguments []string) bool {
+	normalize_cli_arguments(arguments) or { return true }
+	return false
+}
+
+fn cli_normalization_selftest() ! {
+	v1_selftest := ['helper.exe', '--self-test']
+	selftest_v3 := ['--self-test']
+	ensure(normalize_cli_arguments(v1_selftest)! == v1_selftest, 'V1 selftest argv normalization')!
+	ensure(normalize_cli_arguments(selftest_v3)! == ['verify_results', '--self-test'],
+		'V3 selftest argv normalization')!
+	v3_run := ['results.tsv', 'gcc', 'report.txt']
+	mut v1_run := ['helper.exe']
+	v1_run << v3_run
+	ensure(normalize_cli_arguments(v1_run)! == v1_run, 'V1 run argv normalization')!
+	mut expected_v3_run := ['verify_results']
+	expected_v3_run << v3_run
+	ensure(normalize_cli_arguments(v3_run)! == expected_v3_run, 'V3 run argv normalization')!
+	ensure(cli_normalization_fails([]), 'empty argv normalization rejection')!
+	ensure(cli_normalization_fails(['helper.exe', '--self-test', 'extra']),
+		'extra selftest argv normalization rejection')!
+	ensure(cli_normalization_fails(['one', 'two']), 'wrong run argv cardinality rejection')!
+}
+
 fn rows_tsv(rows []ContractRow) string {
 	mut text := 'case\tphase\trequired\texit_code\n'
 	for row in rows {
@@ -220,6 +265,7 @@ fn expect_parse_failure(text string, label string) ! {
 }
 
 fn selftest() ! {
+	cli_normalization_selftest()!
 	expected := expected_rows('gcc')
 	ensure(expected.len == 205, 'expected cardinality is ${expected.len}, not 205')!
 	ensure(expected_rows('clang').len == 205, 'clang expected cardinality changed')!
@@ -263,27 +309,31 @@ fn selftest() ! {
 		'non-ASCII field')!
 }
 
-fn run() ! {
-	if os.args.len == 2 && os.args[1] == '--self-test' {
+fn run(arguments []string) ! {
+	if arguments.len == 2 && arguments[1] == '--self-test' {
 		selftest()!
 		return
 	}
-	if os.args.len != 4 {
+	if arguments.len != 4 {
 		return error('usage: verify_results.v <results.tsv> <compiler> <report>')
 	}
-	bytes := os.read_bytes(os.args[1])!
+	bytes := os.read_bytes(arguments[1])!
 	if !validate.utf8_data(bytes.data, bytes.len) {
 		return error('results TSV is not valid UTF-8')
 	}
-	result := evaluate(bytes.bytestr(), os.args[2])!
-	os.write_file(os.args[3], result.report)!
+	result := evaluate(bytes.bytestr(), arguments[2])!
+	os.write_file(arguments[3], result.report)!
 	if result.errors.len > 0 {
 		return error(result.errors.join('\n'))
 	}
 }
 
 fn main() {
-	run() or {
+	arguments := normalize_cli_arguments(os.args) or {
+		eprintln(err.msg())
+		exit(1)
+	}
+	run(arguments) or {
 		eprintln(err.msg())
 		exit(1)
 	}

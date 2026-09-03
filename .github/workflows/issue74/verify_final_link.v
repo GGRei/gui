@@ -763,6 +763,64 @@ fn self_expect(condition bool, message string) ! {
 	}
 }
 
+fn normalize_cli_arguments(arguments []string) ![]string {
+	if arguments.len == 1 && arguments[0] == '--selftest' {
+		return ['verify_final_link', arguments[0]]
+	}
+	if arguments.len == 2 && arguments[1] == '--selftest' {
+		return arguments.clone()
+	}
+	if arguments.len >= 1 && arguments[0] == 'compare-files' {
+		mut normalized := ['verify_final_link']
+		normalized << arguments
+		return normalized
+	}
+	if arguments.len >= 2 && arguments[1] == 'compare-files' {
+		return arguments.clone()
+	}
+	if arguments.len == 9 {
+		mut normalized := ['verify_final_link']
+		normalized << arguments
+		return normalized
+	}
+	if arguments.len == 10 {
+		return arguments.clone()
+	}
+	return error('usage: verify_final_link.v <log> <output> <v1|v3> <dynamic|static> <dev|s2|s3> <lane> <cc> <cxx> <report>')
+}
+
+fn cli_normalization_fails(arguments []string) bool {
+	normalize_cli_arguments(arguments) or { return true }
+	return false
+}
+
+fn run_cli_normalization_selftest() ! {
+	v1_selftest := ['helper.exe', '--selftest']
+	v3_selftest := ['--selftest']
+	self_expect(normalize_cli_arguments(v1_selftest)! == v1_selftest, 'V1 selftest argv normalization')!
+	self_expect(normalize_cli_arguments(v3_selftest)! == ['verify_final_link', '--selftest'],
+		'V3 selftest argv normalization')!
+	v1_compare := ['helper.exe', 'compare-files', 'left', 'right']
+	v3_compare := ['compare-files', 'left', 'right']
+	self_expect(normalize_cli_arguments(v1_compare)! == v1_compare, 'V1 compare argv normalization')!
+	self_expect(normalize_cli_arguments(v3_compare)! == ['verify_final_link', 'compare-files', 'left',
+		'right'], 'V3 compare argv normalization')!
+	v3_verify := ['input.log', 'output.exe', 'v3', 'static', 's3', 'ucrt64-clang', 'clang',
+		'clang++', 'report.txt']
+	mut v1_verify := ['helper.exe']
+	v1_verify << v3_verify
+	self_expect(normalize_cli_arguments(v1_verify)! == v1_verify, 'V1 verify argv normalization')!
+	mut expected_v3_verify := ['verify_final_link']
+	expected_v3_verify << v3_verify
+	self_expect(normalize_cli_arguments(v3_verify)! == expected_v3_verify,
+		'V3 verify argv normalization')!
+	self_expect(cli_normalization_fails([]), 'empty argv normalization rejection')!
+	self_expect(cli_normalization_fails(['helper.exe', '--selftest', 'extra']),
+		'extra selftest argv normalization rejection')!
+	self_expect(cli_normalization_fails(['one', 'two', 'three']),
+		'wrong verify argv cardinality rejection')!
+}
+
 fn words_fail(text string, expected string) bool {
 	split_words(text) or { return err.msg().contains(expected) }
 	return false
@@ -956,6 +1014,7 @@ fn run_compare_files_selftest() ! {
 }
 
 fn run_selftest() ! {
+	run_cli_normalization_selftest()!
 	replacement := [u8(0xef), u8(0xbf), u8(0xbd)].bytestr()
 	self_expect(decode_utf8_replace('plain'.bytes()) == 'plain', 'ASCII UTF-8 decoding')!
 	self_expect(decode_utf8_replace([u8(0xc3), u8(0xa9)]) == 'é', 'valid UTF-8 decoding')!
@@ -1127,11 +1186,15 @@ fn selftest_cli(arguments []string) int {
 }
 
 fn main() {
-	if os.args.len >= 2 && os.args[1] == 'compare-files' {
-		exit(compare_files_cli(os.args[2..]))
+	arguments := normalize_cli_arguments(os.args) or {
+		eprintln(err.msg())
+		exit(1)
 	}
-	if os.args.len >= 2 && os.args[1] == '--selftest' {
-		exit(selftest_cli(os.args))
+	if arguments.len >= 2 && arguments[1] == 'compare-files' {
+		exit(compare_files_cli(arguments[2..]))
 	}
-	exit(verify_cli(os.args))
+	if arguments.len >= 2 && arguments[1] == '--selftest' {
+		exit(selftest_cli(arguments))
+	}
+	exit(verify_cli(arguments))
 }
