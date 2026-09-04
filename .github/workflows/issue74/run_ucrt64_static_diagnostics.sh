@@ -915,7 +915,11 @@ for generation in v1 v3; do
 					fi
 					showcase_name="showcase_${generation}_${mode}_${profile}_${pass}"
 					output_stem="$showcase_name"
-					run_v_build "$showcase_name" yes "$showcase_v" "${args[@]}" -ldflags -mwindows
+					showcase_args=("${args[@]}")
+					if [ "$generation" = v3 ]; then
+						showcase_args+=(-no-parallel)
+					fi
+					run_v_build "$showcase_name" yes "$showcase_v" "${showcase_args[@]}" -ldflags -mwindows
 					verify_final_link_contract "$showcase_name" "$generation" "$mode" "$profile"
 					if [ "$cc" = gcc ] || [ "$generation" = v3 ]; then
 						verify_build_flag "$showcase_name" present -flto
