@@ -25,7 +25,7 @@ concurrency:
 
 env:
   V_REPOSITORY: https://github.com/GGRei/v.git
-  V_REVISION: 9540085f3a7e13ce1f835d3aca39c48aea0b81e8
+  V_REVISION: 122d2514bfbee89cad51e8cf51764825357605aa
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
   VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
   VMODULES: ${{ github.workspace }}\.vmodules
