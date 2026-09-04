@@ -858,7 +858,16 @@ if [ -z "${V3_GNU_STANDALONE-}" ]; then
 fi
 v3_exe="$(to_unix_path "$V3_GNU_STANDALONE")"
 vroot="$(cd -- "$(dirname -- "$v_exe")" && pwd)"
-vlib_path="$(cygpath -w "$vroot/vlib")|@vlib|@vmodules"
+if [ ! -d "$gui_dir" ] || [ -L "$gui_dir" ]; then
+	echo "GUI module directory is missing or unsafe: $gui_dir" >&2
+	exit 2
+fi
+gui_parent="$(dirname -- "$(realpath "$gui_dir")")"
+if [ ! -d "$gui_parent" ] || [ -L "$gui_parent" ]; then
+	echo "GUI module parent is missing or unsafe: $gui_parent" >&2
+	exit 2
+fi
+vlib_path="$(cygpath -aw "$vroot/vlib")|$(cygpath -aw "$gui_parent")|@vlib|@vmodules"
 [ -x "$v3_exe" ] || { echo "standalone V3 is not executable: $v3_exe" >&2; exit 2; }
 
 # Candidate builds rely exclusively on pkg-config metadata and VGlyph's generic
@@ -877,9 +886,9 @@ for generation in v1 v3; do
 			for pass in "${passes[@]}"; do
 				state_dir="$out_dir/state/$generation/$mode/$profile"
 				mkdir -p "$state_dir/vcache" "$state_dir/v3cache" "$state_dir/vtmp"
-				export VCACHE="$(cygpath -w "$state_dir/vcache")"
-				export V3CACHE="$(cygpath -w "$state_dir/v3cache")"
-				export VTMP="$(cygpath -w "$state_dir/vtmp")"
+				export VCACHE="$(cygpath -aw "$state_dir/vcache")"
+				export V3CACHE="$(cygpath -aw "$state_dir/v3cache")"
+				export VTMP="$(cygpath -aw "$state_dir/vtmp")"
 				args=("${generation_args[@]}" -cc "$cc_windows" -c++ "$cxx_windows")
 				[ "$mode" = static ] && args+=(-cflags -static)
 				case "$profile" in
