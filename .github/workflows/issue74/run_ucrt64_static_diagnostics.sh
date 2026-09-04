@@ -917,7 +917,7 @@ for generation in v1 v3; do
 					output_stem="$showcase_name"
 					showcase_args=("${args[@]}")
 					if [ "$generation" = v3 ]; then
-						showcase_args+=(-no-parallel)
+						showcase_args+=(-no-memory-limit)
 					fi
 					run_v_build "$showcase_name" yes "$showcase_v" "${showcase_args[@]}" -ldflags -mwindows
 					verify_final_link_contract "$showcase_name" "$generation" "$mode" "$profile"
