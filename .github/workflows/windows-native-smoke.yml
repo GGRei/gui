@@ -1029,13 +1029,118 @@ jobs:
         GUI_WINDOWS_PREFLIGHT_CC: clang
       run: v run gui/_windows_preflight.vsh
     - name: Run noninteractive native tests
-      run: >
-        v -no-parallel -cc clang test
-        gui/_native_dialog_test.v
-        gui/_native_print_test.v
-        gui/_native_notification_test.v
-        gui/nativebridge/_bridge_ex_test.v
-        gui/nativebridge/_readback_abi_test.v
+      shell: pwsh
+      run: |
+        $PSNativeCommandUseErrorActionPreference = $false
+        & v -no-parallel -cc clang test gui/_native_dialog_test.v gui/_native_print_test.v gui/_native_notification_test.v gui/nativebridge/_bridge_ex_test.v gui/nativebridge/_readback_abi_test.v
+        $primaryRc = $LASTEXITCODE
+        if ($primaryRc -eq 0) { exit 0 }
+
+        # Diagnostic capture only: one read in flight per stream, one shared byte cap.
+        function Invoke-CdbObservation([string]$Label, [string]$FilePath, [string[]]$Arguments, [int]$Seconds) {
+          $process = [Diagnostics.Process]::new()
+          $process.StartInfo.FileName = $FilePath
+          $process.StartInfo.WorkingDirectory = $env:GITHUB_WORKSPACE
+          $process.StartInfo.UseShellExecute = $false
+          $process.StartInfo.CreateNoWindow = $true
+          $process.StartInfo.RedirectStandardInput = $true
+          $process.StartInfo.RedirectStandardOutput = $true
+          $process.StartInfo.RedirectStandardError = $true
+          foreach ($argument in $Arguments) { $process.StartInfo.ArgumentList.Add($argument) }
+          $buffers = @([byte[]]::new(4096), [byte[]]::new(4096))
+          $output = @([IO.MemoryStream]::new(), [IO.MemoryStream]::new())
+          $streams = @(); $pending = @($null, $null)
+          $cancel = [Threading.CancellationTokenSource]::new()
+          $watch = [Diagnostics.Stopwatch]::StartNew()
+          $started = $false; $timedOut = $false; $capped = $false; $killRequested = $false
+          $parentExited = $false; $errorText = ''; $rc = $null; $bytes = 0
+          try {
+            $started = $process.Start()
+            if (-not $started) { throw 'Process.Start returned false' }
+            $process.StandardInput.Close()
+            $streams = @($process.StandardOutput.BaseStream, $process.StandardError.BaseStream)
+            for ($i = 0; $i -lt 2; $i++) { $pending[$i] = $streams[$i].ReadAsync($buffers[$i], 0, 4096, $cancel.Token) }
+            while (-not $process.HasExited -or $null -ne $pending[0] -or $null -ne $pending[1]) {
+              if ($watch.Elapsed.TotalSeconds -ge $Seconds) { $timedOut = $true; break }
+              $progress = $false
+              for ($i = 0; $i -lt 2; $i++) {
+                if ($null -eq $pending[$i] -or -not $pending[$i].IsCompleted) { continue }
+                $progress = $true
+                $count = $pending[$i].GetAwaiter().GetResult()
+                if ($count -eq 0) { $pending[$i] = $null; continue }
+                $take = [Math]::Min($count, 1048576 - $bytes)
+                $output[$i].Write($buffers[$i], 0, $take)
+                $bytes += $take
+                if ($bytes -ge 1048576) { $capped = $true; break }
+                $pending[$i] = $streams[$i].ReadAsync($buffers[$i], 0, 4096, $cancel.Token)
+              }
+              if ($capped) { break }
+              if (-not $progress) { Start-Sleep -Milliseconds 20 }
+            }
+          } catch { $errorText = $_.Exception.Message }
+          finally {
+            if ($started) {
+              try {
+                if (-not $process.HasExited) { $killRequested = $true; $process.Kill($true) }
+                $parentExited = $process.WaitForExit(5000)
+                if ($parentExited) { $rc = $process.ExitCode }
+              } catch { $errorText += " cleanup: $($_.Exception.Message)" }
+            }
+            $cancel.Cancel()
+            foreach ($stream in $streams) { $stream.Dispose() }
+            $cancel.Dispose()
+            $process.Dispose()
+          }
+          $stdout = [Text.Encoding]::UTF8.GetString($output[0].ToArray())
+          $stderr = [Text.Encoding]::UTF8.GetString($output[1].ToArray())
+          foreach ($memory in $output) { $memory.Dispose() }
+          $complete = $started -and $parentExited -and -not $timedOut -and -not $capped -and $errorText -eq ''
+          Write-Host "ISSUE74_CDB $Label rc=$rc capture_complete=$complete bytes=$bytes timeout=$timedOut cap=$capped kill_requested=$killRequested parent_exit_confirmed=$parentExited error=$errorText"
+          Write-Host $stdout
+          Write-Host $stderr
+          return [pscustomobject]@{ Rc = $rc; Complete = $complete; Out = $stdout; Err = $stderr }
+        }
+
+        $hadVtmp = Test-Path Env:VTMP
+        $savedVtmp = $env:VTMP
+        try {
+          $cdb = Get-Item -LiteralPath (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\Debuggers\x64\cdb.exe') -Force
+          if (-not ($cdb -is [IO.FileInfo]) -or ($cdb.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'SDK CDB is not a regular file' }
+          $version = Invoke-CdbObservation 'version' $cdb.FullName @('-version') 5
+          if (-not $version.Complete -or $version.Rc -ne 0) { throw 'CDB version preflight failed' }
+          $ready = Invoke-CdbObservation 'ready' $cdb.FullName @('-lines', '-sins', '-noshell', '-nosqm', '-c', '.echo ISSUE74_CDB_READY; q', (Join-Path $env:SystemRoot 'System32\cmd.exe'), '/d', '/c', 'exit', '0') 10
+          if (-not $ready.Complete -or $ready.Rc -ne 0) { throw 'CDB session preflight failed' }
+          $readyLines = @($ready.Out -split '\r?\n' | Where-Object { $_ -ceq 'ISSUE74_CDB_READY' })
+          if ($readyLines.Count -ne 1) { throw 'CDB session did not produce exactly one READY line' }
+
+          $diagnosticDir = Join-Path $env:RUNNER_TEMP ('issue74-cdb-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $diagnosticDir -ErrorAction Stop | Out-Null
+          $env:VTMP = $diagnosticDir
+          $debugExe = Join-Path $diagnosticDir 'bridge-ex-debug.exe'
+          $vExe = (Get-Command v -CommandType Application).Source
+          $compileArgs = @('-old-compiler', '-no-parallel', '-cc', 'clang', '-no-retry-compilation', '-showcc', '-keepc', '-g', '-skip-running', '-o', $debugExe, '-test-runner', 'dump', '-run-only', 'test_bridge_result_ex_from_legacy_ok', 'run', 'gui/nativebridge/_bridge_ex_test.v')
+          Write-Host ('ISSUE74_CDB compile_argv=' + ($compileArgs | ConvertTo-Json -Compress))
+          $compile = Invoke-CdbObservation 'compile' $vExe $compileArgs 120
+          if (-not $compile.Complete -or $compile.Rc -ne 0) { throw 'Selected debug clone did not compile completely' }
+          $pe = Get-Item -LiteralPath $debugExe -Force
+          if (-not ($pe -is [IO.FileInfo]) -or ($pe.Attributes -band [IO.FileAttributes]::ReparsePoint) -or $pe.Length -le 0 -or $pe.Length -gt 67108864) { throw 'Debug PE is not a bounded regular file' }
+          Write-Host "ISSUE74_CDB PE=$($pe.FullName) bytes=$($pe.Length) sha256=$((Get-FileHash -LiteralPath $pe.FullName -Algorithm SHA256).Hash)"
+          $direct = Invoke-CdbObservation -Label 'direct' -FilePath $pe.FullName -Arguments @() -Seconds 30
+          if (-not $direct.Complete) { throw 'Direct debug clone capture is incomplete' }
+          $directHex = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$direct.Rc), 0).ToString('X8')
+          Write-Host "ISSUE74_CDB direct_exception_hex=$directHex"
+          if ($directHex -cne 'C0000409') { throw 'Selected debug clone did not reproduce C0000409; no further diagnostic attempted' }
+          $debug = Invoke-CdbObservation 'exception' $cdb.FullName @('-lines', '-sins', '-noshell', '-nosqm', '-y', $diagnosticDir, '-c', 'sxe 0xc0000409; g; .lastevent; .exr -1; r; ~* kb; lm; q', $pe.FullName) 60
+          if (-not $debug.Complete) { throw 'CDB exception capture is incomplete; do not interpret it as a complete trace' }
+          $hasException = $debug.Out -match '(?im)^\s*ExceptionCode:\s*c0000409\b'
+          $hasStack = $debug.Out -match '(?im)^\s*(?:#\s+)?Child-SP\s+RetAddr\s+Call Site\s*$'
+          Write-Host "ISSUE74_CDB exception_record_observed=$hasException stack_header_observed=$hasStack; debugger rc alone is not proof"
+          if (-not $hasException -or -not $hasStack) { Write-Warning 'CDB did not supply both the expected exception record and a stack header' }
+        } catch { Write-Warning "ISSUE74_CDB diagnostic incomplete: $($_.Exception.Message)" }
+        finally {
+          if ($hadVtmp) { $env:VTMP = $savedVtmp } else { Remove-Item Env:VTMP -ErrorAction SilentlyContinue }
+          exit $primaryRc
+        }
     - name: Compile native smoke examples
       run: |
         v -no-parallel -cc clang -W -o dialogs_smoke.exe gui/examples/dialogs.v
