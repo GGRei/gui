@@ -98,8 +98,36 @@ jobs:
           fi
           xargs -0 v fmt -verify -inprocess < /tmp/vfmt-files
       - name: Verify formatting
+        id: verify_formatting
         if: github.event_name != 'pull_request'
-        run: v fmt -verify -inprocess gui/
+        shell: bash
+        run: |
+          set +e
+          v fmt -verify -inprocess gui/
+          format_rc=$?
+          if [ "$format_rc" -ne 0 ]; then
+            timeout --kill-after=5s 120s v fmt -diff -inprocess gui/ 2>&1 \
+              | head -c 67108865 > "$RUNNER_TEMP/gui-vfmt-diagnostic.txt"
+            diagnostic_status=("${PIPESTATUS[@]}")
+            diagnostic_bytes="$(wc -c < "$RUNNER_TEMP/gui-vfmt-diagnostic.txt")"
+            printf 'Formatter diagnostic rc=%s capture_rc=%s bytes=%s limit=67108864; not an approved patch\n' \
+              "${diagnostic_status[0]}" "${diagnostic_status[1]}" "$diagnostic_bytes"
+            if [[ ( "${diagnostic_status[0]}" == 0 || "${diagnostic_status[0]}" == 1 ) \
+                && "${diagnostic_status[1]}" == 0 && "$diagnostic_bytes" -le 67108864 ]]; then
+              echo 'diff_ready=true' >> "$GITHUB_OUTPUT"
+            else
+              echo 'Formatter diagnostic incomplete, failed or over limit; no diagnostic artifact will be uploaded.' >&2
+            fi
+          fi
+          exit "$format_rc"
+      - name: Upload formatter diagnostic
+        if: always() && steps.verify_formatting.outcome == 'failure' && steps.verify_formatting.outputs.diff_ready == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-vfmt-diagnostic
+          path: ${{ runner.temp }}/gui-vfmt-diagnostic.txt
+          if-no-files-found: error
+          retention-days: 7
       - name: Check formatting of MD files
         run: v check-md gui/
       - name: Check syntax of changed example scripts
