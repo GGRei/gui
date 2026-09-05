@@ -500,7 +500,11 @@ collect_text_import_mapping() {
 	done
 	[ -n "$dlltool" ] || { echo 'incomplete: no regular triplet dlltool'; return 1; }
 	printf 'dlltool=%s\n' "$dlltool"
-	timeout --foreground --kill-after=1s 4s "$dlltool" --version || return 1
+	timeout --foreground --kill-after=1s 4s "$dlltool" --version
+	tool_rc=$?
+	printf 'dlltool_version_rc=%s (not supported by every LLVM dlltool)\n' "$tool_rc"
+	timeout --foreground --kill-after=1s 4s sha256sum -- "$dlltool" || return 1
+	timeout --foreground --kill-after=1s 4s pacman -Qo -- "$dlltool" || return 1
 	pkgconfig_output="$(timeout --foreground --kill-after=1s 4s "$prefix/bin/pkgconf.exe" \
 		--static --libs-only-l "${roots[@]}" 2>&1)"
 	tool_rc=$?
@@ -534,7 +538,7 @@ collect_text_import_mapping() {
 					tool_rc=$?
 					printf 'driver_lookup=%s rc=%s result=%s\n' "$candidate" "$tool_rc" "$resolved"
 					[ "$tool_rc" -eq 0 ] && [ "$resolved" != "$candidate" ] || continue
-					archive="$resolved"
+					archive="$(cygpath -u "$resolved")" || return 1
 				fi
 				if [ ! -f "$archive" ] || [ -L "$archive" ]; then
 					printf 'unavailable_regular_archive=%s\n' "$archive"
@@ -550,7 +554,7 @@ collect_text_import_mapping() {
 				printf 'sha256_rc=%s\n' "$?"
 				timeout --foreground --kill-after=1s 4s pacman -Qo -- "$archive"
 				printf 'package_owner_rc=%s\n' "$?"
-				timeout --foreground --kill-after=1s 4s "$dlltool" --identify "$archive"
+				timeout --foreground --kill-after=1s 4s "$dlltool" -I "$archive"
 				printf 'identify_rc=%s\n' "$?"
 			done
 		done

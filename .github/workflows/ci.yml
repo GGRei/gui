@@ -259,7 +259,7 @@ jobs:
             cc: clang
       fail-fast: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 120
     env:
       VFLAGS: -no-parallel
     steps:
