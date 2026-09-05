@@ -481,8 +481,10 @@ write_environment_report() {
 collect_text_import_mapping() {
 	local prefix="$1"
 	local cxx_driver="$2"
+	local object_inspector="$3"
 	local dlltool=''
-	local candidate token name archive resolved pkgconfig_output group tool_rc count=0
+	local candidate token name archive resolved pkgconfig_output group tool_rc lookup_arg count=0
+	local pair_identified=no
 	local -a roots=(freetype2 harfbuzz fribidi fontconfig pango pangoft2 gobject-2.0 glib-2.0)
 	local -a text_tokens=()
 	local -a tokens=()
@@ -490,7 +492,8 @@ collect_text_import_mapping() {
 	prefix="$(realpath "$prefix")" || return 1
 	printf 'diagnostic_only=true\nruntime_private_coverage=partial\nprefix=%s\n' "$prefix"
 	printf 'roots: %s\n' "${roots[*]}"
-	printf 'declared_fallback=-liconv\nprivate_runtime_candidates=stdc++,c++,winpthread,gcc_s,unwind\n'
+	printf 'declared_fallback=-liconv\nprivate_runtime_candidates=stdc++,c++,winpthread,gcc_s,unwind,gcc,gcc_eh,pthread,mingw32,mingwex,moldname,msvcrt\n'
+	printf 'clang64_builtin=absolute archive from -print-libgcc-file-name\n'
 	for candidate in "$prefix/bin/dlltool.exe" "$prefix/bin/llvm-dlltool.exe"; do
 		if [ -f "$candidate" ] && [ -x "$candidate" ] && [ ! -L "$candidate" ]; then
 			dlltool="$(realpath "$candidate")" || return 1
@@ -516,8 +519,12 @@ collect_text_import_mapping() {
 		if [ "$group" = pkgconfig_and_declared_fallback ]; then
 			tokens=("${text_tokens[@]}")
 		else
-			# Observations only: this is not an exhaustive C++ runtime closure.
-			tokens=(-lstdc++ -lc++ -lwinpthread -lgcc_s -lunwind)
+			# Complete the finite V1/V3 S3 driver observations, not all possible modes.
+			tokens=(-lstdc++ -lc++ -lwinpthread -lgcc_s -lunwind -lgcc -lgcc_eh -lpthread
+				-lmingw32 -lmingwex -lmoldname -lmsvcrt)
+			if [ "${prefix##*/}" = clang64 ]; then
+				tokens+=(libclang_rt.builtins-x86_64.a)
+			fi
 		fi
 		for token in "${tokens[@]}"; do
 			[ -z "${seen[$group:$token]+present}" ] || continue
@@ -525,20 +532,34 @@ collect_text_import_mapping() {
 			count=$((count + 1))
 			[ "$count" -le 128 ] || { echo 'incomplete: token limit 128 reached'; return 1; }
 			printf '\ngroup=%s token=%s\n' "$group" "$token"
-			if [[ ! "$token" =~ ^-l[A-Za-z0-9_+.-]+$ ]]; then
+			if [ "$token" = libclang_rt.builtins-x86_64.a ]; then
+				# The driver emits this absolute archive, not an inferred -l flag.
+				name=clang_rt.builtins-x86_64
+			elif [[ ! "$token" =~ ^-l[A-Za-z0-9_+.-]+$ ]]; then
 				echo 'incomplete: unsupported library token; no filename inferred'
 				continue
+			else
+				name="${token#-l}"
 			fi
-			name="${token#-l}"
+			pair_identified=no
 			for candidate in "lib$name.dll.a" "lib$name.a"; do
 				archive="$prefix/lib/$candidate"
 				if [ "$group" = private_runtime_candidates ]; then
+					lookup_arg="-print-file-name=$candidate"
+					if [ "$token" = libclang_rt.builtins-x86_64.a ]; then
+						[ "$candidate" = "$token" ] || continue
+						lookup_arg=-print-libgcc-file-name
+					fi
 					resolved="$(timeout --foreground --kill-after=1s 4s "$cxx_driver" \
-						"-print-file-name=$candidate" 2>&1)"
+						"$lookup_arg" 2>&1)"
 					tool_rc=$?
-					printf 'driver_lookup=%s rc=%s result=%s\n' "$candidate" "$tool_rc" "$resolved"
+					printf 'driver_lookup=%s rc=%s result=%s\n' "$lookup_arg" "$tool_rc" "$resolved"
 					[ "$tool_rc" -eq 0 ] && [ "$resolved" != "$candidate" ] || continue
 					archive="$(cygpath -u "$resolved")" || return 1
+					if [ "$token" = libclang_rt.builtins-x86_64.a ] && [ "${archive##*/}" != "$token" ]; then
+						echo 'incomplete: unexpected absolute compiler runtime basename'
+						return 1
+					fi
 				fi
 				if [ ! -f "$archive" ] || [ -L "$archive" ]; then
 					printf 'unavailable_regular_archive=%s\n' "$archive"
@@ -555,7 +576,19 @@ collect_text_import_mapping() {
 				timeout --foreground --kill-after=1s 4s pacman -Qo -- "$archive"
 				printf 'package_owner_rc=%s\n' "$?"
 				timeout --foreground --kill-after=1s 4s "$dlltool" -I "$archive"
-				printf 'identify_rc=%s\n' "$?"
+				tool_rc=$?
+				printf 'identify_rc=%s\n' "$tool_rc"
+				if [ "$tool_rc" -eq 0 ]; then
+					pair_identified=yes
+				elif [ "$tool_rc" -eq 1 ] && [ "$pair_identified" = no ]; then
+					case "$group:$token" in
+						private_runtime_candidates:*|pkgconfig_and_declared_fallback:-lm|pkgconfig_and_declared_fallback:-luuid)
+							# Evidence only: neither rc0 nor absent DLL names prove static contents.
+							timeout --foreground --kill-after=1s 4s "$object_inspector" -f -h "$archive"
+							printf 'object_inspection_rc=%s\n' "$?"
+							;;
+					esac
+				fi
 			done
 		done
 	done
@@ -585,7 +618,7 @@ copy_pkgconfig_metadata() {
 		(
 			export -f collect_text_import_mapping
 			timeout --kill-after=2s 118s bash -c 'collect_text_import_mapping "$@"' \
-				_ "$MINGW_PREFIX" "$cxx_exe"
+				_ "$MINGW_PREFIX" "$cxx_exe" "$objdump_tool"
 		) 2>&1 | head -c 8388608 > "$mapping_report"
 		mapping_rc=("${PIPESTATUS[@]}")
 		mapping_bytes="$(wc -c < "$mapping_report")"
