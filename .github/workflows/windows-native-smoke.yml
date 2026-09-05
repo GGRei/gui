@@ -1624,7 +1624,7 @@ jobs:
             esac
             case "$relative" in
               *.dmp|*/*/*/*/*) echo "Rejected artifact: $relative" >&2; return 1 ;;
-              logs/*|bin/*|pe/*|pkgconfig/lib/*.pc|pkgconfig/share/*.pc|pkgconfig/*.txt|generated/*|probes/*|windows/collection.txt|windows/status.txt|windows/event-logs/Application.txt|windows/event-logs/Microsoft-Windows-Windows_Defender_Operational.txt|windows/event-logs/Microsoft-Windows-CodeIntegrity_Operational.txt|windows/wer/manifest.txt|windows/wer/*/*|results.tsv|results-contract.txt|summary.md|environment.txt|.diagnostic-start) ;;
+              logs/*|bin/*|pe/*|pkgconfig/lib/*.pc|pkgconfig/share/*.pc|pkgconfig/*.txt|pkgconfig/text-closure.tsv|generated/*|probes/*|windows/collection.txt|windows/status.txt|windows/event-logs/Application.txt|windows/event-logs/Microsoft-Windows-Windows_Defender_Operational.txt|windows/event-logs/Microsoft-Windows-CodeIntegrity_Operational.txt|windows/wer/manifest.txt|windows/wer/*/*|results.tsv|results-contract.txt|summary.md|environment.txt|.diagnostic-start) ;;
               *) echo "Unknown artifact: $relative" >&2; return 1 ;;
             esac
             size="$(stat -c '%s' "$file")"

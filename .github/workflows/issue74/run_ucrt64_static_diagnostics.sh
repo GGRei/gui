@@ -770,7 +770,7 @@ copy_pkgconfig_metadata() {
 		# The human inventory stays partial; only checked versioned rows feed the scoped gate.
 		(
 			export -f collect_text_import_mapping known_static_closure_archive
-			timeout --kill-after=2s 118s bash -c 'collect_text_import_mapping "$@"' \
+			timeout --kill-after=2s 598s bash -c 'collect_text_import_mapping "$@"' \
 				_ "$MINGW_PREFIX" "$cxx_exe" "$objdump_tool"
 		) 2>&1 | head -c 8388608 > "$mapping_report"
 		mapping_rc=("${PIPESTATUS[@]}")
@@ -779,7 +779,7 @@ copy_pkgconfig_metadata() {
 			&& [ "$mapping_bytes" -lt 8388608 ]; then
 			capture_complete=yes
 		fi
-		printf 'human_inventory=diagnostic_only\nclosure_catalogue=versioned_scope\ncapture_complete=%s\ncollector_rc=%s\ncapture_rc=%s\nbytes=%s\nbyte_limit=8388608\ntime_limit_seconds=120\nruntime_private_coverage=partial\n' \
+		printf 'human_inventory=diagnostic_only\nclosure_catalogue=versioned_scope\ncapture_complete=%s\ncollector_rc=%s\ncapture_rc=%s\nbytes=%s\nbyte_limit=8388608\ntime_limit_seconds=600\nruntime_private_coverage=partial\n' \
 			"$capture_complete" "${mapping_rc[0]}" "${mapping_rc[1]}" "$mapping_bytes" > "$mapping_status"
 		cat "$mapping_status"
 		# Structured rows originate at the checked archive, never by parsing the
