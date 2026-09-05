@@ -638,107 +638,13 @@ jobs:
         GUI_WINDOWS_PREFLIGHT_CC: msvc
       run: v run gui/_windows_preflight.vsh
     - name: Run noninteractive native tests
-      shell: pwsh
-      run: |
-        $PSNativeCommandUseErrorActionPreference = $false
-        & v -no-parallel -cc msvc test gui/_native_dialog_test.v gui/_native_print_test.v gui/_native_notification_test.v gui/nativebridge/_bridge_ex_test.v gui/nativebridge/_readback_abi_test.v
-        $primaryRc = $LASTEXITCODE
-
-        # Diagnostic branch only: preserve the five-test result and the shader cache.
-        # Capture mechanism is the existing CDB observer; no new process framework.
-        function Invoke-ShaderObservation([string]$Label, [string]$FilePath, [string[]]$Arguments, [int]$Seconds) {
-          $process = [Diagnostics.Process]::new()
-          $process.StartInfo.FileName = $FilePath
-          $process.StartInfo.WorkingDirectory = $env:GITHUB_WORKSPACE
-          $process.StartInfo.UseShellExecute = $false
-          $process.StartInfo.CreateNoWindow = $true
-          $process.StartInfo.RedirectStandardInput = $true
-          $process.StartInfo.RedirectStandardOutput = $true
-          $process.StartInfo.RedirectStandardError = $true
-          foreach ($argument in $Arguments) { $process.StartInfo.ArgumentList.Add($argument) }
-          $buffers = @([byte[]]::new(4096), [byte[]]::new(4096))
-          $output = @([IO.MemoryStream]::new(), [IO.MemoryStream]::new())
-          $streams = @(); $pending = @($null, $null)
-          $cancel = [Threading.CancellationTokenSource]::new()
-          $watch = [Diagnostics.Stopwatch]::StartNew()
-          $started = $false; $timedOut = $false; $capped = $false; $killRequested = $false
-          $parentExited = $false; $errorText = ''; $rc = $null; $bytes = 0
-          try {
-            $started = $process.Start()
-            if (-not $started) { throw 'Process.Start returned false' }
-            $process.StandardInput.Close()
-            $streams = @($process.StandardOutput.BaseStream, $process.StandardError.BaseStream)
-            for ($i = 0; $i -lt 2; $i++) { $pending[$i] = $streams[$i].ReadAsync($buffers[$i], 0, 4096, $cancel.Token) }
-            while (-not $process.HasExited -or $null -ne $pending[0] -or $null -ne $pending[1]) {
-              if ($watch.Elapsed.TotalSeconds -ge $Seconds) { $timedOut = $true; break }
-              $progress = $false
-              for ($i = 0; $i -lt 2; $i++) {
-                if ($null -eq $pending[$i] -or -not $pending[$i].IsCompleted) { continue }
-                $progress = $true
-                $count = $pending[$i].GetAwaiter().GetResult()
-                if ($count -eq 0) { $pending[$i] = $null; continue }
-                $take = [Math]::Min($count, 1048576 - $bytes)
-                $output[$i].Write($buffers[$i], 0, $take)
-                $bytes += $take
-                if ($bytes -ge 1048576) { $capped = $true; break }
-                $pending[$i] = $streams[$i].ReadAsync($buffers[$i], 0, 4096, $cancel.Token)
-              }
-              if ($capped) { break }
-              if (-not $progress) { Start-Sleep -Milliseconds 20 }
-            }
-          } catch { $errorText = $_.Exception.Message }
-          finally {
-            if ($started) {
-              try {
-                if (-not $process.HasExited) { $killRequested = $true; $process.Kill($true) }
-                $parentExited = $process.WaitForExit(5000)
-                if ($parentExited) { $rc = $process.ExitCode }
-              } catch { $errorText += " cleanup: $($_.Exception.Message)" }
-            }
-            $cancel.Cancel()
-            foreach ($stream in $streams) { $stream.Dispose() }
-            $cancel.Dispose()
-            $process.Dispose()
-          }
-          $stdout = [Text.Encoding]::UTF8.GetString($output[0].ToArray())
-          $stderr = [Text.Encoding]::UTF8.GetString($output[1].ToArray())
-          foreach ($memory in $output) { $memory.Dispose() }
-          $complete = $started -and $parentExited -and -not $timedOut -and -not $capped -and $errorText -eq ''
-          Write-Host "ISSUE74_SHADER $Label rc=$rc capture_complete=$complete bytes=$bytes timeout=$timedOut cap=$capped kill_requested=$killRequested parent_exit_confirmed=$parentExited error=$errorText"
-          Write-Host $stdout
-          Write-Host $stderr
-          return [pscustomobject]@{ Rc = $rc; Complete = $complete; Out = $stdout; Err = $stderr }
-        }
-
-        $savedShaderEnv = @{}
-        foreach ($name in @('VFLAGS', 'VJOBS', 'VTEST_ONLY_FN', 'GUI_CHECK_GENERATED_SHADERS')) {
-          $savedShaderEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
-        }
-        try {
-          $env:VFLAGS = '-no-parallel -cc msvc'
-          $env:VJOBS = '1'
-          $env:VTEST_ONLY_FN = 'test_*'
-          $env:GUI_CHECK_GENERATED_SHADERS = '1'
-          $vExe = (Resolve-Path '.\v\v.exe').Path
-          Write-Host 'ISSUE74_SHADER diagnostic_only=true; backend=MSVC; VFLAGS=-no-parallel -cc msvc; VJOBS=1; VTEST_ONLY_FN=test_*; GUI_CHECK_GENERATED_SHADERS=1'
-          Write-Host 'ISSUE74_SHADER command: v -test-runner dump run gui/_shaders_test.v (entire file, no function filter)'
-          $dump = Invoke-ShaderObservation 'all-functions-dump' $vExe @('-test-runner', 'dump', 'run', 'gui/_shaders_test.v') 180
-          if (-not $dump.Complete) { Write-Warning 'Shader test observation is incomplete; no stopping function may be inferred from a truncated capture' }
-
-          $diagnosticDir = Join-Path $env:RUNNER_TEMP ('issue74-shader-' + [Guid]::NewGuid().ToString('N'))
-          New-Item -ItemType Directory -Path $diagnosticDir -ErrorAction Stop | Out-Null
-          $shaderCopy = Join-Path $diagnosticDir 'gui_builtin.glsl'
-          Copy-Item -LiteralPath 'gui/shaders/gui_builtin.glsl' -Destination $shaderCopy -ErrorAction Stop
-          $env:VFLAGS += ' -v'
-          Write-Host 'ISSUE74_SHADER command: v shader --verbose -l glsl410 -l hlsl4 -l metal_macos <temporary copy>; VFLAGS retains MSVC and adds existing -v; cache unchanged'
-          $shader = Invoke-ShaderObservation 'shader-child-verbose' $vExe @('shader', '--verbose', '-l', 'glsl410', '-l', 'hlsl4', '-l', 'metal_macos', $shaderCopy) 180
-          if (-not $shader.Complete) { Write-Warning 'Shader child observation is incomplete; its output is not proof of a completed generation' }
-        } catch { Write-Warning "ISSUE74_SHADER diagnostic incomplete: $($_.Exception.Message)" }
-        finally {
-          foreach ($name in $savedShaderEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $savedShaderEnv[$name], 'Process') }
-          Write-Host "ISSUE74_SHADER diagnostic does not replace auto-CI shader verdict; native_primary_rc=$primaryRc"
-          exit $primaryRc
-        }
+      run: >
+        v -no-parallel -cc msvc test
+        gui/_native_dialog_test.v
+        gui/_native_print_test.v
+        gui/_native_notification_test.v
+        gui/nativebridge/_bridge_ex_test.v
+        gui/nativebridge/_readback_abi_test.v
     - name: Compile native smoke examples
       run: |
         v -no-parallel -cc msvc -W -o dialogs_smoke.exe gui/examples/dialogs.v
