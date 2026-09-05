@@ -1459,7 +1459,8 @@ jobs:
       continue-on-error: true
       shell: msys2 {0}
       run: |
-        set -euo pipefail
+        set -Eeuo pipefail
+        trap 'diagnostic_rc=$?; printf "Issue74 finalizer failed at line %s (exit %s): %s\n" "$LINENO" "$diagnostic_rc" "$BASH_COMMAND" >&2; exit "$diagnostic_rc"' ERR
         root="issue74-artifacts/${{ matrix.cc }}"
         test -d "$root" && test ! -L "$root"
         final_link_v1="$(cygpath -u "${ISSUE74_VERIFY_FINAL_LINK_V1:?}")"

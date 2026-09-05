@@ -598,7 +598,7 @@ verify_build_flag() {
 	if [ -f "$final_link_report" ]; then
 		observed_count="$(awk -F '\t' -v token="$token" '
 			/^argv=/ {
-				for (index = 2; index <= NF; index++) if ($index == token) count++
+				for (field_index = 2; field_index <= NF; field_index++) if ($field_index == token) count++
 			}
 			END { print count + 0 }
 		' "$final_link_report")"
@@ -647,7 +647,7 @@ verify_final_link_contract() {
 	local report_v1="$flat.v1.tmp" report_v3="$flat.v3.tmp"
 	local stdout_v1="$flat.v1.stdout.tmp" stdout_v3="$flat.v3.stdout.tmp"
 	local stderr_v1="$flat.v1.stderr.tmp" stderr_v3="$flat.v3.stderr.tmp"
-	expected_output_windows="$(cygpath -w "$bin_dir/${output_stem}.exe")" || rc=$?
+	expected_output_windows="$(cygpath -aw "$bin_dir/${output_stem}.exe")" || rc=$?
 	if [ "$rc" -eq 0 ]; then
 		"$final_link_parser_v1" "$log" "$expected_output_windows" "$generation" "$mode" \
 			"$profile" "$lane" "$cc_windows" "$cxx_windows" "$report_v1" \
