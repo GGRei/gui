@@ -40,7 +40,7 @@ env:
   V_REPOSITORY: https://github.com/GGRei/v.git
   V_REVISION: 122d2514bfbee89cad51e8cf51764825357605aa
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
-  VGLYPH_REVISION: 5e0d41e4f21468d3edf24c7365b284d74e9889db
+  VGLYPH_REVISION: c386b0a7cd0d97479902e81238611ceb6483aaaf
 
 jobs:
   linting:
@@ -48,6 +48,15 @@ jobs:
     timeout-minutes: 25
     env:
       VFLAGS: -no-parallel
+      # Stable V/VSH formatting policy, not a claim about GUI's historical compiler.
+      # Build/test V and check-md keep the current toolchain above.
+      FORMATTER_V_REPOSITORY: https://github.com/vlang/v.git
+      FORMATTER_V_REVISION: ddc9c99fda9b46d4a1e3d8fe674a4395bb311d96
+      FORMATTER_VC_REPOSITORY: https://github.com/vlang/vc.git
+      FORMATTER_VC_REVISION: 9977696dabd010a2d0c34b258aa0b0cfba05d569
+      FORMATTER_TCC_REPOSITORY: https://github.com/vlang/tccbin.git
+      FORMATTER_TCC_REVISION: 696c1d84ad12e3a5b68b50fb0210819ed3d56bb8
+      FORMATTER_TCC_SOURCE_REVISION: f8bd136d198bdafe71342517fa325da2e243dc68
     steps:
       - name: Install pinned V and vglyph
         shell: bash
@@ -74,6 +83,95 @@ jobs:
           [[ "$(git -C "$modules/vglyph" rev-parse HEAD)" == "$vglyph_revision" ]]
           echo "VMODULES=$modules" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/v" >> "$GITHUB_PATH"
+      - name: Restore stable V formatter cache
+        id: restore-formatter-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/v-formatter
+          key: linux-vfmt-${{ runner.arch }}-${{ env.FORMATTER_V_REVISION }}-vc-${{ env.FORMATTER_VC_REVISION }}-tcc-${{ env.FORMATTER_TCC_REVISION }}-src-${{ env.FORMATTER_TCC_SOURCE_REVISION }}-schema1
+      - name: Install isolated stable V formatter
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_revision='${{ env.FORMATTER_V_REVISION }}'
+          expected_vc_revision='${{ env.FORMATTER_VC_REVISION }}'
+          expected_tcc_revision='${{ env.FORMATTER_TCC_REVISION }}'
+          expected_tcc_source_revision='${{ env.FORMATTER_TCC_SOURCE_REVISION }}'
+          expected_tcc_version='tcc version 0.9.28rc 2025-02-13 HEAD@f8bd136d (x86_64 Linux)'
+          v_checkout="$RUNNER_TEMP/v-formatter"
+          tcc_checkout="$v_checkout/thirdparty/tcc"
+
+          formatter_tcc_is_valid() {
+            local checkout="$1"
+            local actual_revision
+            local actual_source_revision
+            local declared_version
+            local runtime_version
+            actual_revision="$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)"
+            [[ "$actual_revision" == "$expected_tcc_revision" ]] || return 1
+            [[ -f "$checkout/build_source_hash.txt" && ! -L "$checkout/build_source_hash.txt" ]] || return 1
+            actual_source_revision="$(< "$checkout/build_source_hash.txt")"
+            [[ "$actual_source_revision" == "$expected_tcc_source_revision" ]] || return 1
+            [[ -f "$checkout/build_version.txt" && ! -L "$checkout/build_version.txt" ]] || return 1
+            declared_version="$(< "$checkout/build_version.txt")"
+            [[ "$declared_version" == "$expected_tcc_version" ]] || return 1
+            [[ -x "$checkout/tcc.exe" && ! -L "$checkout/tcc.exe" ]] || return 1
+            [[ -s "$checkout/lib/libgc.a" && ! -L "$checkout/lib/libgc.a" ]] || return 1
+            runtime_version="$("$checkout/tcc.exe" --version 2>/dev/null || true)"
+            [[ "$runtime_version" == "$expected_tcc_version" ]]
+          }
+
+          if [[ -x "$v_checkout/v" ]]; then
+            cached_revision="$(git -C "$v_checkout" rev-parse HEAD 2>/dev/null || true)"
+            cached_vc_revision="$(git -C "$v_checkout/vc" rev-parse HEAD 2>/dev/null || true)"
+            if [[ "$cached_revision" != "$expected_revision" \
+                || "$cached_vc_revision" != "$expected_vc_revision" ]] \
+                || ! formatter_tcc_is_valid "$tcc_checkout"; then
+              echo 'Cached formatter V/VC/TCC provenance is incomplete or mismatched; rebuilding.'
+              rm -rf "$v_checkout"
+            fi
+          fi
+          if [[ ! -x "$v_checkout/v" ]]; then
+            rm -rf "$v_checkout"
+            git init "$v_checkout"
+            git -C "$v_checkout" remote add origin '${{ env.FORMATTER_V_REPOSITORY }}'
+            git -C "$v_checkout" fetch --depth 1 origin "$expected_revision"
+            git -C "$v_checkout" checkout --detach FETCH_HEAD
+            git init "$v_checkout/vc"
+            git -C "$v_checkout/vc" remote add origin '${{ env.FORMATTER_VC_REPOSITORY }}'
+            git -C "$v_checkout/vc" fetch --depth 1 origin "$expected_vc_revision"
+            git -C "$v_checkout/vc" checkout --detach FETCH_HEAD
+            git init "$tcc_checkout"
+            git -C "$tcc_checkout" remote add origin '${{ env.FORMATTER_TCC_REPOSITORY }}'
+            git -C "$tcc_checkout" fetch --depth 1 origin "$expected_tcc_revision"
+            git -C "$tcc_checkout" checkout --detach FETCH_HEAD
+            formatter_tcc_is_valid "$tcc_checkout"
+            make -C "$v_checkout" -j2 local=1
+          fi
+          actual_revision="$(git -C "$v_checkout" rev-parse HEAD)"
+          actual_vc_revision="$(git -C "$v_checkout/vc" rev-parse HEAD)"
+          actual_tcc_revision="$(git -C "$tcc_checkout" rev-parse HEAD)"
+          [[ "$actual_revision" == "$expected_revision" ]]
+          [[ "$actual_vc_revision" == "$expected_vc_revision" ]]
+          [[ "$actual_tcc_revision" == "$expected_tcc_revision" ]]
+          formatter_tcc_is_valid "$tcc_checkout"
+          git -C "$v_checkout" diff --quiet HEAD --
+          [[ -f "$v_checkout/v" && -x "$v_checkout/v" && ! -L "$v_checkout/v" ]]
+          "$v_checkout/v" version
+          printf 'FORMATTER_V=%s\nVC=%s\nTCC=%s\nTCC_SOURCE=%s\nTCC_VERSION=%s\n' \
+            "$actual_revision" "$actual_vc_revision" "$actual_tcc_revision" \
+            "$(< "$tcc_checkout/build_source_hash.txt")" \
+            "$(< "$tcc_checkout/build_version.txt")"
+          "$v_checkout/v" fmt -help
+          [[ -f "$v_checkout/cmd/tools/vfmt" && -x "$v_checkout/cmd/tools/vfmt" \
+              && ! -L "$v_checkout/cmd/tools/vfmt" ]]
+          echo "V_FORMATTER=$v_checkout/v" >> "$GITHUB_ENV"
+      - name: Save stable V formatter cache
+        if: steps.restore-formatter-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/v-formatter
+          key: ${{ steps.restore-formatter-cache.outputs.cache-primary-key }}
       - name: Install C development dependencies (headers and libs)
         if: runner.os == 'Linux'
         run: v retry -- sudo apt -qq update && v retry -- sudo apt install libpango1.0-dev libfontconfig1-dev libfribidi-dev libharfbuzz-dev libfreetype-dev libgl1-mesa-dri xvfb libxcursor-dev libxi-dev libxrandr-dev freeglut3-dev dbus libdbus-1-dev libdbus-glib-1-2 libdbus-glib-1-dev
@@ -96,17 +194,17 @@ jobs:
             echo "No changed V/VSH files to format-check."
             exit 0
           fi
-          xargs -0 v fmt -verify -inprocess < /tmp/vfmt-files
+          xargs -0 "$V_FORMATTER" fmt -verify -inprocess < /tmp/vfmt-files
       - name: Verify formatting
         id: verify_formatting
         if: github.event_name != 'pull_request'
         shell: bash
         run: |
           set +e
-          v fmt -verify -inprocess gui/
+          "$V_FORMATTER" fmt -verify -inprocess gui/
           format_rc=$?
           if [ "$format_rc" -ne 0 ]; then
-            timeout --kill-after=5s 120s v fmt -diff -inprocess gui/ 2>&1 \
+            timeout --kill-after=5s 120s "$V_FORMATTER" fmt -diff -inprocess gui/ 2>&1 \
               | head -c 67108865 > "$RUNNER_TEMP/gui-vfmt-diagnostic.txt"
             diagnostic_status=("${PIPESTATUS[@]}")
             diagnostic_bytes="$(wc -c < "$RUNNER_TEMP/gui-vfmt-diagnostic.txt")"
@@ -215,7 +313,7 @@ jobs:
             i=$((i + 1))
             echo "[$i/$test_count] gui/$file"
           done < "$test_manifest"
-          V_MACOS_V3_NO_FALLBACK=1 v -new-compiler -gc none test gui/
+          # Issue #74 V1/V3 static/dynamic coverage remains in windows-native-smoke.yml.
           v -old-compiler test gui/
       - name: Check compilation of examples
         if: github.event_name == 'pull_request'
