@@ -25,7 +25,7 @@ concurrency:
 
 env:
   V_REPOSITORY: https://github.com/GGRei/v.git
-  V_REVISION: a1b3bda3d012ebcfa89e4e1f9acea6550829a863
+  V_REVISION: d412d1910b0a129ed575ed571a82ca0de46c0123
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
   VGLYPH_REVISION: 1a3240d7b87c300df5e8e93a1a7a4f24ebf5eaba
   VMODULES: ${{ github.workspace }}\.vmodules
@@ -638,6 +638,11 @@ jobs:
         GUI_WINDOWS_PREFLIGHT_CC: msvc
       run: v run gui/_windows_preflight.vsh
     - name: Run noninteractive native tests
+      env:
+        GUI_CHECK_GENERATED_SHADERS: "1"
+        VFLAGS: -no-parallel -cc msvc
+        VJOBS: 1
+        VTEST_ONLY_FN: test_*
       run: >
         v -no-parallel -cc msvc test
         gui/_native_dialog_test.v
@@ -645,6 +650,7 @@ jobs:
         gui/_native_notification_test.v
         gui/nativebridge/_bridge_ex_test.v
         gui/nativebridge/_readback_abi_test.v
+        gui/_shaders_test.v
     - name: Compile native smoke examples
       run: |
         v -no-parallel -cc msvc -W -o dialogs_smoke.exe gui/examples/dialogs.v
