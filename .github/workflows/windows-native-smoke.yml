@@ -27,7 +27,7 @@ env:
   V_REPOSITORY: https://github.com/GGRei/v.git
   V_REVISION: 122d2514bfbee89cad51e8cf51764825357605aa
   VGLYPH_REPOSITORY: https://github.com/GGRei/vglyph.git
-  VGLYPH_REVISION: c386b0a7cd0d97479902e81238611ceb6483aaaf
+  VGLYPH_REVISION: e8863274a2d9a9568215fb0da2efe3ad305b0d64
   VMODULES: ${{ github.workspace }}\.vmodules
   VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
   VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite

@@ -478,6 +478,86 @@ write_environment_report() {
 	cat "$report"
 }
 
+collect_text_import_mapping() {
+	local prefix="$1"
+	local cxx_driver="$2"
+	local dlltool=''
+	local candidate token name archive resolved pkgconfig_output group tool_rc count=0
+	local -a roots=(freetype2 harfbuzz fribidi fontconfig pango pangoft2 gobject-2.0 glib-2.0)
+	local -a text_tokens=()
+	local -a tokens=()
+	local -A seen=()
+	prefix="$(realpath "$prefix")" || return 1
+	printf 'diagnostic_only=true\nruntime_private_coverage=partial\nprefix=%s\n' "$prefix"
+	printf 'roots: %s\n' "${roots[*]}"
+	printf 'declared_fallback=-liconv\nprivate_runtime_candidates=stdc++,c++,winpthread,gcc_s,unwind\n'
+	for candidate in "$prefix/bin/dlltool.exe" "$prefix/bin/llvm-dlltool.exe"; do
+		if [ -f "$candidate" ] && [ -x "$candidate" ] && [ ! -L "$candidate" ]; then
+			dlltool="$(realpath "$candidate")" || return 1
+			[[ "$dlltool" == "$prefix/bin/"* ]] || return 1
+			break
+		fi
+	done
+	[ -n "$dlltool" ] || { echo 'incomplete: no regular triplet dlltool'; return 1; }
+	printf 'dlltool=%s\n' "$dlltool"
+	timeout --foreground --kill-after=1s 4s "$dlltool" --version || return 1
+	pkgconfig_output="$(timeout --foreground --kill-after=1s 4s "$prefix/bin/pkgconf.exe" \
+		--static --libs-only-l "${roots[@]}" 2>&1)"
+	tool_rc=$?
+	printf 'pkgconf_rc=%s\npkgconf_output=%s\n' "$tool_rc" "$pkgconfig_output"
+	[ "$tool_rc" -eq 0 ] || return 1
+	read -r -a text_tokens <<< "$pkgconfig_output"
+	text_tokens+=(-liconv)
+	for group in pkgconfig_and_declared_fallback private_runtime_candidates; do
+		if [ "$group" = pkgconfig_and_declared_fallback ]; then
+			tokens=("${text_tokens[@]}")
+		else
+			# Observations only: this is not an exhaustive C++ runtime closure.
+			tokens=(-lstdc++ -lc++ -lwinpthread -lgcc_s -lunwind)
+		fi
+		for token in "${tokens[@]}"; do
+			[ -z "${seen[$group:$token]+present}" ] || continue
+			seen["$group:$token"]=1
+			count=$((count + 1))
+			[ "$count" -le 128 ] || { echo 'incomplete: token limit 128 reached'; return 1; }
+			printf '\ngroup=%s token=%s\n' "$group" "$token"
+			if [[ ! "$token" =~ ^-l[A-Za-z0-9_+.-]+$ ]]; then
+				echo 'incomplete: unsupported library token; no filename inferred'
+				continue
+			fi
+			name="${token#-l}"
+			for candidate in "lib$name.dll.a" "lib$name.a"; do
+				archive="$prefix/lib/$candidate"
+				if [ "$group" = private_runtime_candidates ]; then
+					resolved="$(timeout --foreground --kill-after=1s 4s "$cxx_driver" \
+						"-print-file-name=$candidate" 2>&1)"
+					tool_rc=$?
+					printf 'driver_lookup=%s rc=%s result=%s\n' "$candidate" "$tool_rc" "$resolved"
+					[ "$tool_rc" -eq 0 ] && [ "$resolved" != "$candidate" ] || continue
+					archive="$resolved"
+				fi
+				if [ ! -f "$archive" ] || [ -L "$archive" ]; then
+					printf 'unavailable_regular_archive=%s\n' "$archive"
+					continue
+				fi
+				archive="$(realpath "$archive")" || return 1
+				if [[ "$archive" != "$prefix/"* ]]; then
+					printf 'incomplete: archive outside triplet: %s\n' "$archive"
+					continue
+				fi
+				printf 'archive=%s size_bytes=%s\n' "$archive" "$(stat -c %s "$archive")"
+				timeout --foreground --kill-after=1s 4s sha256sum -- "$archive"
+				printf 'sha256_rc=%s\n' "$?"
+				timeout --foreground --kill-after=1s 4s pacman -Qo -- "$archive"
+				printf 'package_owner_rc=%s\n' "$?"
+				timeout --foreground --kill-after=1s 4s "$dlltool" --identify "$archive"
+				printf 'identify_rc=%s\n' "$?"
+			done
+		done
+	done
+	printf '\ncollection_end=true\nruntime_private_coverage=partial\n'
+}
+
 copy_pkgconfig_metadata() {
 	local pc_root
 	local destination
@@ -491,6 +571,28 @@ copy_pkgconfig_metadata() {
 	pkgconf --libs pangoft2 > "$pkgconfig_dir/pangoft2.dynamic-libs.txt" 2>&1 || true
 	pkgconf --static --libs pangoft2 > "$pkgconfig_dir/pangoft2.static-libs.txt" 2>&1 || true
 	find "$pkgconfig_dir" -type f -name '*.pc' -print | sort > "$pkgconfig_dir/pc-manifest.txt"
+	local mapping_report="$pkgconfig_dir/text-import-mapping.txt"
+	local mapping_status="$pkgconfig_dir/text-import-mapping-status.txt"
+	local mapping_bytes capture_complete=no
+	local -a mapping_rc=()
+	if [ ! -e "$mapping_report" ]; then
+		# The outer timeout controls the process group, including internal tools.
+		# No result row or gate is derived from this deliberately partial inventory.
+		(
+			export -f collect_text_import_mapping
+			timeout --kill-after=2s 118s bash -c 'collect_text_import_mapping "$@"' \
+				_ "$MINGW_PREFIX" "$cxx_exe"
+		) 2>&1 | head -c 8388608 > "$mapping_report"
+		mapping_rc=("${PIPESTATUS[@]}")
+		mapping_bytes="$(wc -c < "$mapping_report")"
+		if [ "${mapping_rc[0]}" -eq 0 ] && [ "${mapping_rc[1]}" -eq 0 ] \
+			&& [ "$mapping_bytes" -lt 8388608 ]; then
+			capture_complete=yes
+		fi
+		printf 'diagnostic_only=true\ncapture_complete=%s\ncollector_rc=%s\ncapture_rc=%s\nbytes=%s\nbyte_limit=8388608\ntime_limit_seconds=120\nruntime_private_coverage=partial\n' \
+			"$capture_complete" "${mapping_rc[0]}" "${mapping_rc[1]}" "$mapping_bytes" > "$mapping_status"
+		cat "$mapping_status"
+	fi
 }
 
 copy_generated_files() {
