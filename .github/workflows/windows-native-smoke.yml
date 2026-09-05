@@ -1523,12 +1523,19 @@ jobs:
               *) echo "Unknown artifact: $relative" >&2; return 1 ;;
             esac
             size="$(stat -c '%s' "$file")"
-            test "$size" -le 8388608
+            if [ "$size" -gt 67108864 ]; then
+              printf 'Artifact exceeds file limit: %s (%s bytes; limit 67108864)\n' "$relative" "$size" >&2
+              return 1
+            fi
             sha="$(sha256sum "$file" | cut -d' ' -f1)"
             printf '%s\t%s\t%s\n' "$relative" "$size" "$sha" >> "$output_manifest"
             count=$((count + 1)); bytes=$((bytes + size))
           done < <(find "$root" -mindepth 1 -type f -print0)
-          test "$count" -gt 0 && test "$bytes" -le 67108864
+          test "$count" -gt 0
+          if [ "$bytes" -gt 536870912 ]; then
+            printf 'Artifacts exceed total limit: %s bytes (limit 536870912)\n' "$bytes" >&2
+            return 1
+          fi
           scan_count="$count"
           scan_bytes="$bytes"
         }
@@ -1622,7 +1629,10 @@ jobs:
         manifest_size="$(stat -c '%s' "$manifest")"
         meta_size="$(stat -c '%s' "$meta")"
         test "$manifest_size" -le 8388608 && test "$meta_size" -le 8388608
-        test $((scan_bytes + manifest_size + meta_size)) -le 67108864
+        if [ $((scan_bytes + manifest_size + meta_size)) -gt 536870912 ]; then
+          printf 'Artifacts and metadata exceed total limit: %s bytes (limit 536870912)\n' "$((scan_bytes + manifest_size + meta_size))" >&2
+          exit 1
+        fi
         github_output="$(cygpath -u "$GITHUB_OUTPUT")"
         echo 'artifact_safe=true' >> "$github_output"
         exit "$evidence_rc"
