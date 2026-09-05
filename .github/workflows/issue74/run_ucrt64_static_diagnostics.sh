@@ -120,6 +120,9 @@ declare -a required_v_artifact_cases=()
 declare -A artifact_output_stem=()
 required_failures=0
 last_rc=0
+text_closure_complete=no
+text_closure_ready=no
+declare -A text_closure_dlls=()
 
 to_unix_path() {
 	local path="$1"
@@ -269,6 +272,55 @@ inspect_pe() {
 	grep -i 'DLL Name' "$report" || true
 }
 
+verify_showcase_closure() {
+	local name="$1" generation="${2%%_*}"
+	local flat probe payload token item count dll negative_seen=no
+	local -a argv=() actual=() expected=()
+	[ "$text_closure_complete" = yes ] || { echo 'closure proof must be revalidated: unknown/incomplete catalogue'; return 1; }
+	if [ "$text_closure_ready" != yes ]; then
+		[ "${case_rc[c_dynamic_build]:-missing}" = 0 ] || return 1
+		capture_compact_pe "$bin_dir/c_dynamic.exe" "$pe_dir/c_dynamic_closure_control.txt" || return 1
+		while IFS= read -r dll; do
+			dll="${dll#DLL Name: }"; dll="${dll,,}"
+			[ -z "${text_closure_dlls[$dll]+present}" ] || negative_seen=yes
+		done < <(grep '^DLL Name: ' "$pe_dir/c_dynamic_closure_control.txt")
+		[ "$negative_seen" = yes ] || { echo 'dynamic PE negative control did not detect the text closure'; return 1; }
+		text_closure_ready=yes
+	fi
+	probe="vglyph_${generation}_static_s3_cold"
+	for item in "$probe" "$name"; do
+		[ "${case_rc[${item}_build]:-missing}" = 0 ] && [ "${case_rc[${item}_final_link]:-missing}" = 0 ] || return 1
+		flat="$logs_dir/${item}_final-link.txt"
+		[ -f "$flat" ] && [ ! -L "$flat" ] && [ "$(wc -c < "$flat")" -le 8388608 ] || return 1
+		[ "$(wc -l < "$flat")" -eq 7 ] && [ "$(grep -c '^argv=' "$flat")" -eq 1 ] \
+			&& [ "$(grep -c '^errors=' "$flat")" -eq 1 ] && grep -Fxq 'errors=' "$flat" || return 1
+		payload="$(sed -n 's/^argv=//p' "$flat")"
+		[[ -n "$payload" && "$payload" != $'\t'* && "$payload" != *$'\t' && "$payload" != *$'\t\t'* \
+			&& "$payload" != *$'\n'* && "$payload" != *$'\r'* ]] || return 1
+		IFS=$'\t' read -r -a argv <<< "$payload" || return 1
+		actual=(); expected=(-static -municode -pthread -pthread)
+		[ "$generation" != v1 ] || expected+=(-Wl,-stack=33554432)
+		[ "$cc" != gcc ] && [ "$generation" != v3 ] || expected+=(-flto)
+		[ "$generation:$lane" != v3:ucrt64-clang ] || expected+=(-fuse-ld=lld)
+		[ "$item" != "$name" ] || expected+=(-mwindows)
+		for ((count=1; count<${#argv[@]}; count++)); do
+			token="${argv[count]}"
+			if [ "$token" = -l ]; then
+				count=$((count + 1)); [ "$count" -lt "${#argv[@]}" ] || return 1
+				token="-l${argv[count]}"
+			fi
+			case "$token" in
+				-static|-municode|-pthread|-flto|-fuse-ld=lld|-Wl,-stack=33554432|-mwindows) actual+=("$token") ;;
+				-fwrapv|-fno-strict-aliasing) ;;
+				-m*|-f*|-Wl,*|-Xlinker*|-static*|-shared*|-nostd*|-nodefault*|-nostart*|-no-pthread*|-pthread*|-p|-pg|-nolibc|-B*|--*|-rtlib*|-stdlib*|-unwindlib*|-target*|-sysroot*|-specs*|-lstdc++*|-lc++*|-lgcc*|-lunwind*|-lclang_rt*|-l:*)
+					echo "closure proof must be revalidated: uncovered runtime selector $token"; return 1 ;;
+			esac
+		done
+		[ "$(printf '%s\n' "${actual[@]}" | LC_ALL=C sort)" = "$(printf '%s\n' "${expected[@]}" | LC_ALL=C sort)" ] || return 1
+	done
+	return 0
+}
+
 check_static_pe() {
 	local name="$1"
 	local required="$2"
@@ -299,6 +351,9 @@ check_static_pe() {
 	fi
 	case "$expected_subsystem" in
 		gui)
+			if ! verify_showcase_closure "$name" "${name#showcase_}" "$report"; then
+				gate_rc=6
+			fi
 			if ! grep -Fxq 'subsystem: gui' "$report"; then
 				gate_rc=4
 			fi
@@ -320,7 +375,8 @@ check_static_pe() {
 		dll_name="${dll_name%$'\r'}"
 		[ -n "$dll_name" ] || continue
 		lower_name="${dll_name,,}"
-		if [ -f "$MINGW_PREFIX/bin/$dll_name" ] || [[ "$lower_name" == lib*.dll ]] || [ "$lower_name" = zlib1.dll ]; then
+		if { [ "$expected_subsystem" = gui ] && [ -n "${text_closure_dlls[$lower_name]+present}" ]; } \
+			|| { [ "$expected_subsystem" != gui ] && { [ -f "$MINGW_PREFIX/bin/$dll_name" ] || [[ "$lower_name" == lib*.dll ]] || [ "$lower_name" = zlib1.dll ]; }; }; then
 			third_party_imports+=("$dll_name")
 		fi
 	done < <(grep '^DLL Name: ' "$report" || true)
@@ -331,6 +387,7 @@ check_static_pe() {
 	{
 		echo "file: $executable"
 		echo "expected_subsystem: $expected_subsystem"
+		[ "$expected_subsystem" != gui ] || { echo 'scope: versioned text/pkg-config closure and observed private runtimes; other imports remain visible'; cat "$report"; }
 		echo "third_party_imports: ${third_party_imports[*]:-none}"
 		echo "gate_exit_code: $gate_rc"
 	} | tee "$log_file"
@@ -384,9 +441,7 @@ run_v_build() {
 	fi
 	case "$name" in
 		*_static_*)
-			if [[ "$name" == showcase_* ]]; then
-				check_static_pe "$name" "$proof_required" "$executable" "$build_rc" gui
-			else
+			if [[ "$name" != showcase_* ]]; then
 				check_static_pe "$name" "$proof_required" "$executable" "$build_rc" console
 			fi
 			;;
@@ -478,6 +533,29 @@ write_environment_report() {
 	cat "$report"
 }
 
+known_static_closure_archive() {
+	local triplet="$1" token="$2" digest="$3" owner="$4" package_prefix="$5" expected='' package_kind=crt package_version=14.0.0.r353.g6df76fa52-4
+	# Versioned evidence, not a claim about future MSYS2 updates. Unknown bytes
+	# require revalidation of the closure catalogue, not a product-regression label.
+	case "$triplet:$token" in
+		clang64:-lm) expected=ff48de55d2c4f2e7297aefcedd461c6fc9c25dddd3c6dbd5d406a9f13ef0d24a ;;
+		ucrt64:-lm|mingw64:-lm) expected=535b5fcae10596de1bc575716369cb01e2c6b4232870dd1735f100160a44418d ;;
+		clang64:-luuid) expected=b49bedee7d2f4fda30a07be1281df94c95dcbf6d08419647240142608bf17910 ;;
+		ucrt64:-luuid|mingw64:-luuid) expected=1d20cfa8948337cd87e9fa2b55957a629747e961a91a7200b01c6028e41a0800 ;;
+		clang64:-lmingw32) expected=ef2976aa425eb096b6d242075c85967348b0b9bbd33fa7229e0d02ee80d98308 ;;
+		ucrt64:-lmingw32|mingw64:-lmingw32) expected=65618dfd40a23d560e79dfa99858fa627b7ab738c3ba0c3781593712db68d934 ;;
+		clang64:-lmingwex) expected=4d2e9523e8ed86712e855ae2529236b1a9d3d7f62efa901eae5db245af825b1e ;;
+		ucrt64:-lmingwex|mingw64:-lmingwex) expected=4971d1bc807e3c49021f7a60320d28910e7052cea64b04132a9008fff3ec4779 ;;
+		clang64:-lmoldname) expected=5ffa2cee24b1b5fad9418ade37a2eea0f3d46f84dc68314a7f836a9a42cdaeb8 ;;
+		ucrt64:-lmoldname|mingw64:-lmoldname) expected=c90fab06b641376fb6b896ec8e19c0c5674ba03620ffd03c88d10e0f9494d6eb ;;
+		ucrt64:-lgcc|mingw64:-lgcc) expected=2fb177d002383f802852ce7506096af5ff9ea22836f0d31d51849de485214ed2; package_kind=gcc; package_version=16.2.0-3 ;;
+		ucrt64:-lgcc_eh|mingw64:-lgcc_eh) expected=9f2a47dd4d2530f54a771139f532d4560223630173f5ff4adabd26a2a37cf46e; package_kind=gcc; package_version=16.2.0-3 ;;
+		clang64:libclang_rt.builtins-x86_64.a) expected=d0f5ea54483e3892fb8ef5d1b6db292b3b05a19617e0fca5e64a917566e6e770; package_kind=compiler-rt; package_version=22.1.8-2 ;;
+		*) return 1 ;;
+	esac
+	[ "$digest" = "$expected" ] && [ "$owner" = "$package_prefix-$package_kind $package_version" ]
+}
+
 collect_text_import_mapping() {
 	local prefix="$1"
 	local cxx_driver="$2"
@@ -485,12 +563,26 @@ collect_text_import_mapping() {
 	local dlltool=''
 	local candidate token name archive resolved pkgconfig_output group tool_rc lookup_arg count=0
 	local pair_identified=no
+	local package_prefix required closure_rc=0 classified static_owner pair_owner digest owner owner_name import_names dll class alias_owner expected_owner
+	local -a required_runtime=(-lpthread -lmingw32 -lmingwex -lmsvcrt)
 	local -a roots=(freetype2 harfbuzz fribidi fontconfig pango pangoft2 gobject-2.0 glib-2.0)
 	local -a text_tokens=()
 	local -a tokens=()
 	local -A seen=()
 	prefix="$(realpath "$prefix")" || return 1
-	printf 'diagnostic_only=true\nruntime_private_coverage=partial\nprefix=%s\n' "$prefix"
+	case "${prefix##*/}" in
+		clang64) package_prefix=mingw-w64-clang-x86_64; required_runtime+=(-lc++ -lunwind libclang_rt.builtins-x86_64.a) ;;
+		ucrt64) package_prefix=mingw-w64-ucrt-x86_64; required_runtime+=(-lstdc++ -lgcc -lgcc_eh) ;;
+		mingw64) package_prefix=mingw-w64-x86_64; required_runtime+=(-lstdc++ -lgcc -lgcc_eh) ;;
+		*) return 1 ;;
+	esac
+	if [ "${cxx_driver##*/}" = clang++.exe ]; then
+		required_runtime+=(-lmoldname)
+		[ "$(timeout --foreground --kill-after=1s 4s pacman -Q "$package_prefix-clang")" = "$package_prefix-clang 22.1.8-2" ] || closure_rc=1
+	else
+		[ "$(timeout --foreground --kill-after=1s 4s pacman -Q "$package_prefix-gcc")" = "$package_prefix-gcc 16.2.0-3" ] || closure_rc=1
+	fi
+	printf 'human_inventory=diagnostic_only\nclosure_catalogue=versioned_scope\nruntime_private_coverage=partial\nprefix=%s\n' "$prefix"
 	printf 'roots: %s\n' "${roots[*]}"
 	printf 'declared_fallback=-liconv\nprivate_runtime_candidates=stdc++,c++,winpthread,gcc_s,unwind,gcc,gcc_eh,pthread,mingw32,mingwex,moldname,msvcrt\n'
 	printf 'clang64_builtin=absolute archive from -print-libgcc-file-name\n'
@@ -532,11 +624,14 @@ collect_text_import_mapping() {
 			count=$((count + 1))
 			[ "$count" -le 128 ] || { echo 'incomplete: token limit 128 reached'; return 1; }
 			printf '\ngroup=%s token=%s\n' "$group" "$token"
+			required=no; classified=no; static_owner=''; pair_owner=''
+			if [ "$group" = pkgconfig_and_declared_fallback ] || [[ " ${required_runtime[*]} " == *" $token "* ]]; then required=yes; fi
 			if [ "$token" = libclang_rt.builtins-x86_64.a ]; then
 				# The driver emits this absolute archive, not an inferred -l flag.
 				name=clang_rt.builtins-x86_64
 			elif [[ ! "$token" =~ ^-l[A-Za-z0-9_+.-]+$ ]]; then
 				echo 'incomplete: unsupported library token; no filename inferred'
+				[ "$required" != yes ] || closure_rc=1
 				continue
 			else
 				name="${token#-l}"
@@ -561,6 +656,14 @@ collect_text_import_mapping() {
 						return 1
 					fi
 				fi
+				if [ -L "$archive" ] && [ "$token" = -lpthread ]; then
+					alias_owner="$(timeout --foreground --kill-after=1s 4s pacman -Qqo -- "$archive")" || return 1
+					archive="$(realpath "$archive")" || return 1
+					case "$archive:$alias_owner" in
+						"$prefix/lib/libwinpthread.a:$package_prefix-winpthreads"|"$prefix/lib/libwinpthread.dll.a:$package_prefix-winpthreads") ;;
+						*) echo 'incomplete: pthread alias is not a proven internal winpthreads file'; return 1 ;;
+					esac
+				fi
 				if [ ! -f "$archive" ] || [ -L "$archive" ]; then
 					printf 'unavailable_regular_archive=%s\n' "$archive"
 					continue
@@ -571,13 +674,58 @@ collect_text_import_mapping() {
 					continue
 				fi
 				printf 'archive=%s size_bytes=%s\n' "$archive" "$(stat -c %s "$archive")"
-				timeout --foreground --kill-after=1s 4s sha256sum -- "$archive"
-				printf 'sha256_rc=%s\n' "$?"
+				[ "$(head -c 8 "$archive")" = '!<arch>' ] || { echo 'incomplete: not a regular archive container'; return 1; }
+				digest="$(timeout --foreground --kill-after=1s 4s sha256sum -- "$archive")" || return 1
+				printf '%s\nsha256_rc=0\n' "$digest"; digest="${digest%% *}"
 				timeout --foreground --kill-after=1s 4s pacman -Qo -- "$archive"
 				printf 'package_owner_rc=%s\n' "$?"
-				timeout --foreground --kill-after=1s 4s "$dlltool" -I "$archive"
+				owner_name="$(timeout --foreground --kill-after=1s 4s pacman -Qqo -- "$archive")" || return 1
+				[[ "$owner_name" == "$package_prefix-"* && "$owner_name" != *[$'\t\r\n ']* ]] || return 1
+				owner="$(timeout --foreground --kill-after=1s 4s pacman -Q "$owner_name")" || return 1
+				[[ "$digest" =~ ^[0-9a-f]{64}$ && "$owner" == "$owner_name "* && "$owner" != *[$'\t\r\n']* \
+					&& "$archive" != *[$'\t\r\n']* ]] || return 1
+				if [ "$required:$group" = yes:private_runtime_candidates ]; then
+					case "$token" in
+						-lstdc++|-lgcc|-lgcc_eh) expected_owner="$package_prefix-gcc 16.2.0-3" ;;
+						-lc++) expected_owner="$package_prefix-libc++ 22.1.8-1" ;;
+						-lunwind) expected_owner="$package_prefix-libunwind 22.1.8-1" ;;
+						-lpthread) expected_owner="$package_prefix-winpthreads 14.0.0.r353.g6df76fa52-2" ;;
+						libclang_rt.builtins-x86_64.a) expected_owner="$package_prefix-compiler-rt 22.1.8-2" ;;
+						*) expected_owner="$package_prefix-crt 14.0.0.r353.g6df76fa52-4" ;;
+					esac
+					[ "$owner" = "$expected_owner" ] || { echo "closure proof must be revalidated: unknown runtime owner $owner"; closure_rc=1; }
+				fi
+				[[ "$candidate" == *.dll.a ]] || static_owner="$owner"
+				import_names="$(timeout --foreground --kill-after=1s 4s "$dlltool" -I "$archive" 2>&1)"
 				tool_rc=$?
+				printf '%s\n' "$import_names"
 				printf 'identify_rc=%s\n' "$tool_rc"
+				if [ "$required" = yes ]; then
+					class=paired_archive
+					if [ "$tool_rc" -eq 0 ]; then
+						class=third_party
+						if [ "$owner_name" = "$package_prefix-crt" ]; then
+							[ "$owner" = "$package_prefix-crt 14.0.0.r353.g6df76fa52-4" ] || closure_rc=1
+							class=os_import
+						fi
+						[ -n "$import_names" ] || closure_rc=1
+						while IFS= read -r dll; do
+							dll="${dll%$'\r'}"; dll="${dll,,}"
+							[[ "$dll" =~ ^[a-z0-9_.+-]+\.dll$ ]] || { closure_rc=1; continue; }
+							printf 'closure_row\t%s\t%s\t%s\t%s\t%s\t%s\n' "$token" "$archive" "$digest" "$owner" "$class" "$dll"
+						done <<< "$import_names"
+						classified=yes; pair_owner="$owner"
+					elif [ "$tool_rc" -ne 1 ]; then
+						closure_rc=1
+					elif [ "$pair_identified" = no ]; then
+						if known_static_closure_archive "${prefix##*/}" "$token" "$digest" "$owner" "$package_prefix"; then
+							class=known_static; classified=yes
+						else
+							echo "closure proof must be revalidated: unknown catalogue entry $token $digest $owner"; closure_rc=1
+						fi
+					fi
+					[ "$tool_rc" -ne 1 ] || printf 'closure_row\t%s\t%s\t%s\t%s\t%s\t-\n' "$token" "$archive" "$digest" "$owner" "$class"
+				fi
 				if [ "$tool_rc" -eq 0 ]; then
 					pair_identified=yes
 				elif [ "$tool_rc" -eq 1 ] && [ "$pair_identified" = no ]; then
@@ -590,8 +738,13 @@ collect_text_import_mapping() {
 					esac
 				fi
 			done
+			if [ "$required" = yes ] && { [ "$classified" != yes ] || [ -z "$static_owner" ] \
+				|| { [ -n "$pair_owner" ] && [ "$static_owner" != "$pair_owner" ]; }; }; then
+				echo "closure proof incomplete for required token $token"; closure_rc=1
+			fi
 		done
 	done
+	printf '\nclosure_catalogue_rc=%s\n' "$closure_rc"
 	printf '\ncollection_end=true\nruntime_private_coverage=partial\n'
 }
 
@@ -614,9 +767,9 @@ copy_pkgconfig_metadata() {
 	local -a mapping_rc=()
 	if [ ! -e "$mapping_report" ]; then
 		# The outer timeout controls the process group, including internal tools.
-		# No result row or gate is derived from this deliberately partial inventory.
+		# The human inventory stays partial; only checked versioned rows feed the scoped gate.
 		(
-			export -f collect_text_import_mapping
+			export -f collect_text_import_mapping known_static_closure_archive
 			timeout --kill-after=2s 118s bash -c 'collect_text_import_mapping "$@"' \
 				_ "$MINGW_PREFIX" "$cxx_exe" "$objdump_tool"
 		) 2>&1 | head -c 8388608 > "$mapping_report"
@@ -626,9 +779,33 @@ copy_pkgconfig_metadata() {
 			&& [ "$mapping_bytes" -lt 8388608 ]; then
 			capture_complete=yes
 		fi
-		printf 'diagnostic_only=true\ncapture_complete=%s\ncollector_rc=%s\ncapture_rc=%s\nbytes=%s\nbyte_limit=8388608\ntime_limit_seconds=120\nruntime_private_coverage=partial\n' \
+		printf 'human_inventory=diagnostic_only\nclosure_catalogue=versioned_scope\ncapture_complete=%s\ncollector_rc=%s\ncapture_rc=%s\nbytes=%s\nbyte_limit=8388608\ntime_limit_seconds=120\nruntime_private_coverage=partial\n' \
 			"$capture_complete" "${mapping_rc[0]}" "${mapping_rc[1]}" "$mapping_bytes" > "$mapping_status"
 		cat "$mapping_status"
+		# Structured rows originate at the checked archive, never by parsing the
+		# human dlltool/objdump prose. Only complete, versioned coverage can gate.
+		local closure_tsv="$pkgconfig_dir/text-closure.tsv" token archive digest owner class dll fields
+		printf 'token\tarchive\tsha256\tpackage_version\tclass\tdll\n' > "$closure_tsv" || return 1
+		awk -F '\t' '$1 == "closure_row" {
+			if (NF != 7) exit 2
+			for (field = 2; field <= NF; field++) if ($field == "") exit 2
+			sub(/^[^\t]*\t/, ""); print
+		}' "$mapping_report" >> "$closure_tsv" || return 1
+		if [ "$capture_complete" = yes ] && [ "$(grep -c '^closure_catalogue_rc=' "$mapping_report")" -eq 1 ] \
+			&& grep -Fxq 'closure_catalogue_rc=0' "$mapping_report" && [ "$(wc -l < "$closure_tsv")" -gt 2 ]; then
+			text_closure_complete=yes
+			while IFS=$'\t' read -r token archive digest owner class dll fields; do
+				[ "$token" != token ] || continue
+				if [ -n "$fields" ] || [ -z "$dll" ] || [[ ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then text_closure_complete=no; break; fi
+				case "$class" in
+					third_party) [[ "$dll" =~ ^[a-z0-9_.+-]+\.dll$ ]] || { text_closure_complete=no; break; }; text_closure_dlls["$dll"]=1 ;;
+					os_import|known_static|paired_archive) ;;
+					*) text_closure_complete=no; break ;;
+				esac
+			done < "$closure_tsv"
+			[ "${#text_closure_dlls[@]}" -gt 0 ] || text_closure_complete=no
+		fi
+		printf 'text_closure_complete=%s (versioned catalogue; unknown evidence requires revalidation)\n' "$text_closure_complete"
 	fi
 }
 
@@ -1115,7 +1292,11 @@ for generation in v1 v3; do
 						showcase_args+=(-no-memory-limit)
 					fi
 					run_v_build "$showcase_name" yes "$showcase_v" "${showcase_args[@]}" -ldflags -mwindows
+					showcase_build_rc="$last_rc"
 					verify_final_link_contract "$showcase_name" "$generation" "$mode" "$profile"
+					if [ "$mode" = static ]; then
+						check_static_pe "$showcase_name" yes "$bin_dir/$output_stem.exe" "$showcase_build_rc" gui
+					fi
 					if [ "$cc" = gcc ] || [ "$generation" = v3 ]; then
 						verify_build_flag "$showcase_name" present -flto
 					else
