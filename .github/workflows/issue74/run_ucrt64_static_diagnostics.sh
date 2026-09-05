@@ -799,6 +799,59 @@ verify_final_link_contract() {
 	record_result "${name}_final_link" oracle yes "$rc"
 }
 
+collect_cxx_runtime_driver() {
+	local name="$1" generation="$2"
+	local flat="$logs_dir/${name}_final-link.txt"
+	local report="$pkgconfig_dir/cxx-runtime-driver-$generation.txt"
+	local status="$pkgconfig_dir/cxx-runtime-driver-$generation-status.txt"
+	local build_case="${name}_build" oracle_case="${name}_final_link"
+	local payload='' resolved_driver='' reason='' complete=no bytes=0
+	local driver_rc=99 capture_rc=99
+	local -a argv=() pipeline_rc=()
+
+	# Read only an already successful, parity-checked final-link report. TSV is
+	# data, never shell code; reject empty fields before Bash can discard them.
+	if [ "${case_rc[$build_case]:-missing}" != 0 ] || [ "${case_rc[$oracle_case]:-missing}" != 0 ]; then
+		reason='build or final-link oracle did not succeed'
+	elif [ ! -f "$flat" ] || [ -L "$flat" ] || [ ! -s "$flat" ]; then
+		reason='missing or unsafe final-link report'
+	elif [ "$(wc -c < "$flat")" -gt 8388608 ] || [ "$(wc -l < "$flat")" -ne 7 ]; then
+		reason='final-link report exceeds size or record boundary'
+	elif [ "$(grep -c '^argv=' "$flat")" -ne 1 ] || [ "$(grep -c '^errors=' "$flat")" -ne 1 ] \
+		|| ! grep -Fxq 'errors=' "$flat"; then
+		reason='ambiguous argv or nonempty final-link errors'
+	else
+		payload="$(sed -n 's/^argv=//p' "$flat")"
+		if [ -z "$payload" ] || [[ "$payload" == $'\t'* || "$payload" == *$'\t' \
+			|| "$payload" == *$'\t\t'* || "$payload" == *$'\n'* || "$payload" == *$'\r'* ]]; then
+			reason='empty or multiline TSV argument'
+		elif ! IFS=$'\t' read -r -a argv <<< "$payload"; then
+			reason='cannot read final-link argv'
+		elif ! resolved_driver="$(cygpath -u "${argv[0]}")" \
+			|| ! resolved_driver="$(realpath "$resolved_driver")" \
+			|| [ "$resolved_driver" != "$cxx_exe" ]; then
+			reason='final-link driver differs from validated C++ driver'
+		else
+			# -### displays the driver's commands without executing a compiler or
+			# linker. Keep every original argument; absent V3 objects stay an error.
+			timeout --kill-after=2s 18s "$cxx_exe" -### "${argv[@]:1}" 2>&1 \
+				| head -c 8388608 > "$report"
+			pipeline_rc=("${PIPESTATUS[@]}")
+			driver_rc="${pipeline_rc[0]}"
+			capture_rc="${pipeline_rc[1]}"
+			bytes="$(wc -c < "$report")"
+			if [ "$driver_rc" -eq 0 ] && [ "$capture_rc" -eq 0 ] && [ "$bytes" -lt 8388608 ]; then
+				complete=yes
+			else
+				reason='driver error, timeout, or capture limit; no runtime completeness inferred'
+			fi
+		fi
+	fi
+	printf 'diagnostic_only=true\ncase=%s\ncapture_complete=%s\ndriver_rc=%s\ncapture_rc=%s\nbytes=%s\nbyte_limit=8388608\ntime_limit_seconds=20\nreason=%s\n' \
+		"$name" "$complete" "$driver_rc" "$capture_rc" "$bytes" "$reason" > "$status"
+	cat "$status"
+}
+
 collect_windows_diagnostics() {
 	local collector_windows
 	local output_windows
@@ -1010,6 +1063,9 @@ for generation in v1 v3; do
 				run_v_build "$name" yes "$probe_v" "${args[@]}"
 				rc="$last_rc"
 				verify_final_link_contract "$name" "$generation" "$mode" "$profile"
+				if [ "$mode:$profile:$pass" = static:s3:cold ]; then
+					collect_cxx_runtime_driver "$name" "$generation"
+				fi
 				run_built_executable "$name" yes "$bin_dir/$output_stem.exe" "$rc"
 				if [ "$profile" = s2 ]; then
 					verify_build_flag "$name" absent -flto
